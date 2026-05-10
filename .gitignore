@@ -19,3 +19,5 @@ uvr/
 whisper-faster/whisper-faster.exe
 *.dll
 *.exe
+temp_model/
+whisper.cpp/
