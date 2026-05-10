@@ -1650,7 +1650,7 @@ class MainWorker(QObject):
                 elif whisper_file.startswith('faster-whisper'):
                     print(param_whisper_faster)
                     faster_params = [param.replace('$whisper_file',whisper_file[15:]).replace('$input_file',wav_file[:-4]).replace('$language',language).replace('$output_dir',os.path.dirname(input_file)) for param in param_whisper_faster.split()]
-                    vad_flags = {'--vad','--vad_method','--vad_threshold','--vad_min_silence_duration_ms','--vad_speech_pad_ms','--vad_filter_speechless_segments','--vad_max_speech_duration_s'}
+                    vad_flags = {'--vad_method','--vad_threshold','--vad_min_speech_duration_ms','--vad_speech_pad_ms','--vad_min_silence_duration_ms','--vad_filter_speechless_segments','--vad_max_speech_duration_s'}
                     i = 0
                     while i < len(faster_params):
                         if faster_params[i] in vad_flags:
@@ -1665,13 +1665,11 @@ class MainWorker(QObject):
                         vad_threshold = self.master.vad_threshold_label.text() if hasattr(self.master, 'vad_threshold_label') else '0.5'
                         vad_min_silence = self.master.vad_min_silence.text() if hasattr(self.master, 'vad_min_silence') else '500'
                         vad_speech_pad = self.master.vad_speech_pad.text() if hasattr(self.master, 'vad_speech_pad') else '400'
-                        faster_params.append('--vad')
-                        faster_params.append('True')
                         faster_params.append('--vad_method')
                         faster_params.append(vad_method)
                         faster_params.append('--vad_threshold')
                         faster_params.append(vad_threshold)
-                        faster_params.append('--vad_min_silence_duration_ms')
+                        faster_params.append('--vad_min_speech_duration_ms')
                         faster_params.append(vad_min_silence)
                         faster_params.append('--vad_speech_pad_ms')
                         faster_params.append(vad_speech_pad)
