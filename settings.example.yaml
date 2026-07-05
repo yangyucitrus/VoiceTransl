@@ -1,0 +1,46 @@
+asr:
+  engine: transwithai_whisper_ja
+  device_preset: gpu_quality
+
+vad:
+  preset: standard_asmr
+
+pipeline:
+  reuse_cache: true
+  continue_on_error: true
+  transcribe_only: false
+  preflight_translation_api: true
+
+subtitle:
+  merge:
+    same_vad_max_gap_ms: 350
+    cross_vad_max_gap_ms: 150
+    max_segment_duration_ms: 6000
+    min_segment_duration_ms: 500
+    max_ja_chars: 42
+    max_zh_chars: 32
+  format:
+    zh_srt_max_line_chars: 18
+    combine_srt_ja_max_line_chars: 24
+    combine_srt_zh_max_line_chars: 18
+    max_lines: 2
+
+translator:
+  endpoint: https://api.deepseek.com
+  model: deepseek-v4-flash
+  profile: ASMR_Adult_2D.md
+
+models:
+  transwithai_whisper_ja: models/transwithai-whisper-ja-1.5b-ct2
+  whisper_vad_onnx: models/whisper-vad-asmr-onnx/model.onnx
+  whisper_vad_metadata: models/whisper-vad-asmr-onnx/model_metadata.json
+  whisper_base: models/whisper-base
+  sherpa_ja: models/sherpa-ja
+
+dictionaries:
+  transcription_corrections: dictionaries/transcription_corrections.txt
+  translation_glossary: dictionaries/translation_glossary.txt
+  post_translation_replacements: dictionaries/post_translation_replacements.txt
+
+quality:
+  enabled: true

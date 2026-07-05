@@ -5,6 +5,7 @@ desktop/
 log.txt
 config.txt
 .env
+settings.yaml
 gui_settings.yaml
 # VSCode
 .vscode
@@ -24,8 +25,17 @@ whisper-faster/whisper-faster.exe
 *.exe
 # Python venv
 .venv
+.cache/
+models/
+runtime/
+*.wav
+*.mp3
+*.mp4
+*.voicetransl/
 # Faster Whisper XXL
 _xxl_data
 project/config.yaml
 # Tests
 Tests
+GalTransl/
+files/

@@ -1,0 +1,27 @@
+# Runtime dependencies for the new ASMR CLI core.
+# Install into the project-local .venv; do not install globally.
+PyYAML
+requests
+orjson
+pysrt
+faster-whisper
+nvidia-cublas-cu12; sys_platform == "win32"
+onnxruntime-directml
+# GalTransl dependencies (GalTransl is vendored in ./GalTransl, not on pip)
+aiofiles
+openai[aiohttp]
+opencc
+openpyxl
+alive_progress
+InquirerPy
+colorlog
+tenacity
+aiohttp
+tiktoken
+nest_asyncio
+packaging
+flet
+librosa
+soundfile
+transformers
+numpy
