@@ -53,7 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass
 class AppConfig:
     root: Path
     settings_path: Path
