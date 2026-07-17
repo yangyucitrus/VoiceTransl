@@ -12,13 +12,17 @@ class FakeWorker implements WorkerTransport {
   List<String> lastInputs = const [];
   Map<String, dynamic> lastOptions = const {};
   String? cancelledRequest;
+  int startCount = 0;
 
   @override
   Stream<Map<String, dynamic>> get messages => controller.stream;
 
   @override
   Future<void> start() async {
-    controller.add({'type': 'ready', 'protocol': 1});
+    startCount += 1;
+    if (startCount == 1) {
+      controller.add({'type': 'ready', 'protocol': 1});
+    }
   }
 
   @override
@@ -72,6 +76,22 @@ class FakeWorkspaceLauncher implements WorkspaceLauncher {
 }
 
 void main() {
+  test('checking an active worker preserves the connected state', () async {
+    final worker = FakeWorker();
+    final controller = WorkbenchController(
+      worker: worker,
+      mediaPicker: FakePicker(const []),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+    await controller.reconnectWorker();
+
+    expect(controller.workerReady, isTrue);
+    expect(controller.statusText, 'Python 后端连接正常');
+    expect(worker.startCount, 1);
+  });
+
   test('runs a selected file and applies worker progress', () async {
     final worker = FakeWorker();
     final controller = WorkbenchController(

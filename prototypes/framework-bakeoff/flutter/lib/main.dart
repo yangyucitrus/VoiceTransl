@@ -1265,7 +1265,7 @@ class _SettingsPage extends StatelessWidget {
                     ? null
                     : controller.reconnectWorker,
                 icon: const Icon(Icons.sync_rounded, size: 18),
-                label: const Text('重新连接'),
+                label: Text(controller.workerReady ? '检查连接' : '重新连接'),
               ),
             ],
           ),

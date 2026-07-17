@@ -302,6 +302,12 @@ class WorkbenchController extends ChangeNotifier {
     if (_worker == null || running) {
       return;
     }
+    if (workerReady) {
+      lastError = '';
+      statusText = 'Python 后端连接正常';
+      notifyListeners();
+      return;
+    }
     workerReady = false;
     lastError = '';
     statusText = '正在重新连接 Python 后端';
