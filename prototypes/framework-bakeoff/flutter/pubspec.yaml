@@ -1,0 +1,21 @@
+name: voicetransl_flutter
+description: Bright native Flutter desktop study for VoiceTransl.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  file_selector: ^1.1.0
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/assistant.png

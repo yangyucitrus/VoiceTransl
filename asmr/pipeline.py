@@ -3,7 +3,7 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .audio import to_wav_16k_mono
 from .config import AppConfig, require_config_ready
@@ -14,6 +14,24 @@ from .subtitles import merge_asr_segments, read_json, write_bilingual_srt, write
 from .transcribe import transcribe_regions
 from .translate import preflight_api, translate_with_galtransl
 from .vad import detect_speech
+
+
+PipelineEventHandler = Callable[[dict[str, Any]], None]
+CancelCheck = Callable[[], bool]
+
+
+class PipelineCancelled(RuntimeError):
+    """Raised when cancellation is requested at a safe pipeline boundary."""
+
+
+def _emit_event(handler: PipelineEventHandler | None, event_type: str, **payload: Any) -> None:
+    if handler is not None:
+        handler({"type": event_type, **payload})
+
+
+def _raise_if_cancelled(should_cancel: CancelCheck | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise PipelineCancelled("Pipeline cancellation requested")
 
 
 @dataclass
@@ -40,9 +58,14 @@ def process_files(
     skip_api_preflight: bool,
     limit_segments: int | None = None,
     start_segment: int = 0,
+    on_event: PipelineEventHandler | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> list[FileResult]:
+    _raise_if_cancelled(should_cancel)
+    _emit_event(on_event, "batch_started", file_count=len(inputs))
     require_config_ready(config, transcribe_only)
     if not transcribe_only and config.settings["pipeline"].get("preflight_translation_api", True) and not skip_api_preflight:
+        _emit_event(on_event, "preflight_started", message="Checking translation API")
         ok, message = preflight_api(
             config.settings["translator"]["endpoint"],
             config.settings["translator"]["model"],
@@ -51,27 +74,97 @@ def process_files(
         if not ok:
             raise RuntimeError(message)
         print(f"[preflight] {message}")
+        _emit_event(on_event, "preflight_finished", ok=True, message=message)
 
+    _raise_if_cancelled(should_cancel)
     missing = check_model_readiness(config, transcribe_only)
     if missing:
         raise RuntimeError("Model readiness check failed:\n" + "\n".join(missing))
 
     results: list[FileResult] = []
-    for input_path in inputs:
+    cancelled = False
+    for file_index, input_path in enumerate(inputs):
         try:
-            results.append(process_one(config, input_path, transcribe_only, no_cache, limit_segments, start_segment))
+            _raise_if_cancelled(should_cancel)
+        except PipelineCancelled:
+            cancelled = True
+            break
+
+        event_context = {
+            "file_index": file_index,
+            "file_count": len(inputs),
+            "input_path": str(input_path),
+            "name": input_path.name,
+        }
+
+        def file_event(event: dict[str, Any], context: dict[str, Any] = event_context) -> None:
+            forwarded = dict(event)
+            event_type = str(forwarded.pop("type"))
+            _emit_event(on_event, event_type, **context, **forwarded)
+
+        _emit_event(on_event, "file_started", **event_context)
+        try:
+            result = process_one(
+                config,
+                input_path,
+                transcribe_only,
+                no_cache,
+                limit_segments,
+                start_segment,
+                on_event=file_event,
+                should_cancel=should_cancel,
+            )
+        except PipelineCancelled:
+            out_dir, _cache_dir, _stem = output_paths(input_path)
+            result = FileResult(input_path, "cancelled", out_dir)
+            cancelled = True
         except Exception as exc:
             out_dir, cache_dir, _stem = output_paths(input_path)
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / "run.log").write_text(traceback.format_exc(), encoding="utf-8")
-            results.append(FileResult(input_path, "failed", out_dir, error=str(exc)))
+            result = FileResult(input_path, "failed", out_dir, error=str(exc))
+        results.append(result)
+        _emit_event(
+            on_event,
+            "file_finished",
+            **event_context,
+            status=result.status,
+            warnings=result.warnings,
+            error=result.error,
+            output_dir=str(result.output_dir),
+        )
+        if cancelled:
+            break
+        if result.status == "failed":
             if not config.settings["pipeline"].get("continue_on_error", True):
                 break
+    _emit_event(
+        on_event,
+        "batch_finished",
+        cancelled=cancelled,
+        completed=len(results),
+        file_count=len(inputs),
+    )
     return results
 
 
-def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_cache: bool, limit_segments: int | None = None, start_segment: int = 0) -> FileResult:
+def process_one(
+    config: AppConfig,
+    input_path: Path,
+    transcribe_only: bool,
+    no_cache: bool,
+    limit_segments: int | None = None,
+    start_segment: int = 0,
+    on_event: PipelineEventHandler | None = None,
+    should_cancel: CancelCheck | None = None,
+) -> FileResult:
     input_path = input_path.resolve()
+    asr_engine = str(config.settings["asr"].get("engine", ""))
+    if asr_engine != "transwithai_whisper_ja":
+        raise RuntimeError(
+            f"Unsupported ASR engine '{asr_engine}'. "
+            "The current pipeline supports transwithai_whisper_ja only."
+        )
     out_dir, cache_dir, stem = output_paths(input_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -83,10 +176,38 @@ def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_c
     zh_json_path = cache_dir / f"{stem}.zh.json"
     quality_path = cache_dir / "quality_report.json"
 
+    stage_count = 5
+
+    def begin_stage(stage: str, label: str, stage_index: int) -> None:
+        _raise_if_cancelled(should_cancel)
+        _emit_event(
+            on_event,
+            "stage_started",
+            stage=stage,
+            label=label,
+            stage_index=stage_index,
+            stage_count=stage_count,
+        )
+
+    def finish_stage(stage: str, stage_index: int, cached: bool = False) -> None:
+        _emit_event(
+            on_event,
+            "stage_finished",
+            stage=stage,
+            stage_index=stage_index,
+            stage_count=stage_count,
+            cached=cached,
+        )
+
+    begin_stage("audio", "Preparing 16 kHz mono audio", 1)
     if no_cache or not audio_path.exists():
         log_lines.append("Converting audio to 16k mono wav")
         to_wav_16k_mono(input_path, audio_path, config.root)
+        finish_stage("audio", 1)
+    else:
+        finish_stage("audio", 1, cached=True)
 
+    begin_stage("vad", "Detecting ASMR speech regions", 2)
     if no_cache or not vad_path.exists():
         log_lines.append("Running ASMR VAD")
         model_paths = config.settings["models"]
@@ -98,9 +219,12 @@ def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_c
             config.path_from_root(model_paths["whisper_base"]),
         )
         write_json(vad_path, vad_doc)
+        finish_stage("vad", 2)
     else:
         vad_doc = read_json(vad_path)
+        finish_stage("vad", 2, cached=True)
 
+    begin_stage("asr", "Transcribing Japanese audio", 3)
     if no_cache or not ja_json_path.exists():
         log_lines.append("Running Japanese ASR")
         model_paths = config.settings["models"]
@@ -114,6 +238,17 @@ def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_c
             cache_dir / "asr_partial.jsonl",
             limit_segments=limit_segments,
             start_segment=start_segment,
+            check_cancel=lambda: _raise_if_cancelled(should_cancel),
+            on_progress=lambda current, total: _emit_event(
+                on_event,
+                "stage_progress",
+                stage="asr",
+                stage_index=3,
+                stage_count=stage_count,
+                current=current,
+                total=total,
+                progress=(current / total) if total else 0.0,
+            ),
         )
         segments = apply_transcription_dictionary(config, segments)
         segments = merge_asr_segments(segments, config.settings["subtitle"]["merge"])
@@ -136,15 +271,19 @@ def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_c
         partial_path = cache_dir / "asr_partial.jsonl"
         if partial_path.exists():
             partial_path.unlink()
+        finish_stage("asr", 3)
     else:
         ja_doc = read_json(ja_json_path)
+        finish_stage("asr", 3, cached=True)
 
     write_srt(out_dir / f"{stem}.ja.srt", ja_doc["segments"], "text")
 
     zh_doc = None
     translation_error = None
     status = "transcribe_only" if transcribe_only else "success"
+    begin_stage("translate", "Translating subtitles", 4)
     if not transcribe_only:
+        translate_cached = not no_cache and zh_json_path.exists()
         try:
             if no_cache or not zh_json_path.exists():
                 log_lines.append("Running GalTransl translation")
@@ -172,15 +311,35 @@ def process_one(config: AppConfig, input_path: Path, transcribe_only: bool, no_c
                 fmt["combine_srt_ja_max_line_chars"],
                 fmt["combine_srt_zh_max_line_chars"],
             )
+            finish_stage("translate", 4, cached=translate_cached)
         except Exception as exc:
             translation_error = str(exc)
             status = "translation_failed"
             log_lines.append(f"Translation failed: {translation_error}")
+            _emit_event(
+                on_event,
+                "stage_failed",
+                stage="translate",
+                stage_index=4,
+                stage_count=stage_count,
+                error=translation_error,
+            )
+    else:
+        _emit_event(
+            on_event,
+            "stage_skipped",
+            stage="translate",
+            stage_index=4,
+            stage_count=stage_count,
+            reason="transcribe_only",
+        )
 
+    begin_stage("quality", "Building quality report", 5)
     report = build_quality_report(ja_doc, zh_doc, translation_error)
     write_json(quality_path, report)
     (cache_dir / "run.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
     warnings = len([item for item in report["checks"] if item["severity"] == "warning"])
+    finish_stage("quality", 5)
     return FileResult(input_path, status, out_dir, warnings=warnings, error=translation_error)
 
 

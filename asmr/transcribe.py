@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .audio import find_ffmpeg
 
@@ -42,6 +42,8 @@ def transcribe_regions(
     partial_path: Path | None = None,
     limit_segments: int | None = None,
     start_segment: int = 0,
+    check_cancel: Callable[[], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     if not model_path.exists():
         raise RuntimeError(f"ASR model missing: {model_path}")
@@ -89,7 +91,11 @@ def transcribe_regions(
     next_id = (max((seg["id"] for seg in results), default=0) + 1) if results else 1
     total = len(vad_segments)
     for index, vad_seg in enumerate(vad_segments, 1):
+        if check_cancel is not None:
+            check_cancel()
         if vad_seg["id"] in done_vad_ids:
+            if on_progress is not None:
+                on_progress(index, total)
             continue
         print(
             f"[asr] {index}/{total} vad={vad_seg['id']} {float(vad_seg['start']):.2f}-{float(vad_seg['end']):.2f}s",
@@ -149,6 +155,8 @@ def transcribe_regions(
             with partial_path.open("a", encoding="utf-8") as fh:
                 for seg in new_segs:
                     fh.write(json.dumps(seg, ensure_ascii=False) + "\n")
+        if on_progress is not None:
+            on_progress(index, total)
     return results
 
 

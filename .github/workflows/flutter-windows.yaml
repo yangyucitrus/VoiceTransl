@@ -1,0 +1,62 @@
+name: Flutter Windows GUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - quality-upgrade-foundation
+    paths:
+      - ".github/workflows/flutter-windows.yaml"
+      - "prototypes/framework-bakeoff/flutter/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: prototypes/framework-bakeoff/flutter
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.6
+          cache: true
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Install Dart dependencies
+        run: flutter pub get
+
+      - name: Analyze Flutter source
+        run: flutter analyze
+
+      - name: Run portable controller tests
+        run: flutter test test/workbench_controller_test.dart
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Upload runnable GUI
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceTransl-Windows-x64
+          path: prototypes/framework-bakeoff/flutter/build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6

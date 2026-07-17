@@ -20,11 +20,6 @@ def check_model_readiness(config: AppConfig, transcribe_only: bool) -> list[str]
         if not path.exists():
             missing.append(f"{label} missing: {path}")
 
-    if settings["asr"].get("engine") == "sherpa_ja":
-        sherpa_path = config.path_from_root(model_paths["sherpa_ja"])
-        if not sherpa_path.exists():
-            missing.append(f"sherpa-onnx Japanese model missing: {sherpa_path}")
-
     return missing
 
 
