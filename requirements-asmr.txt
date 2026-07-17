@@ -20,7 +20,6 @@ aiohttp
 tiktoken
 nest_asyncio
 packaging
-flet
 librosa
 soundfile
 transformers
