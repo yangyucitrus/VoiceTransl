@@ -36,6 +36,11 @@ slice supports native file selection, directory scanning, transcription-only
 runs, structured stage progress, safe cancellation, result reporting, and
 opening the output directory.
 
+The native shell also provides working routes for the media library,
+dictionaries, export history, and runtime settings. The transcript tab reads
+generated Japanese SRT files, while notification and quick-action menus expose
+real session and workspace actions rather than visual placeholders.
+
 Run a protocol smoke test without Flutter:
 
 ```powershell

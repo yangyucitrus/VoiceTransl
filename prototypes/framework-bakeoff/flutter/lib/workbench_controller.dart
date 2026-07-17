@@ -25,6 +25,24 @@ abstract interface class MediaPicker {
   Future<List<String>> pickDirectory();
 }
 
+abstract interface class WorkspaceLauncher {
+  Future<void> openDirectory(String path);
+
+  Future<void> openFile(String path);
+}
+
+class NativeWorkspaceLauncher implements WorkspaceLauncher {
+  @override
+  Future<void> openDirectory(String path) async {
+    await Process.start('explorer.exe', [path], runInShell: false);
+  }
+
+  @override
+  Future<void> openFile(String path) async {
+    await Process.start('notepad.exe', [path], runInShell: false);
+  }
+}
+
 class NativeMediaPicker implements MediaPicker {
   static const XTypeGroup _mediaTypes = XTypeGroup(
     label: '音频和视频',
@@ -134,13 +152,21 @@ class TaskSnapshot {
 }
 
 class WorkbenchController extends ChangeNotifier {
-  WorkbenchController({WorkerTransport? worker, MediaPicker? mediaPicker})
-    : _worker = worker ?? VoiceTranslWorkerClient(),
-      _mediaPicker = mediaPicker ?? NativeMediaPicker();
+  WorkbenchController({
+    WorkerTransport? worker,
+    MediaPicker? mediaPicker,
+    WorkspaceLauncher? workspaceLauncher,
+    Directory? projectRoot,
+  }) : _worker = worker ?? VoiceTranslWorkerClient(),
+       _mediaPicker = mediaPicker ?? NativeMediaPicker(),
+       _workspaceLauncher = workspaceLauncher ?? NativeWorkspaceLauncher(),
+       _projectRoot = projectRoot ?? _findProjectRoot();
 
   WorkbenchController.demo()
     : _worker = null,
       _mediaPicker = NativeMediaPicker(),
+      _workspaceLauncher = NativeWorkspaceLauncher(),
+      _projectRoot = Directory.current,
       workerReady = true,
       running = true,
       statusText = '正在转写日语音频',
@@ -184,6 +210,8 @@ class WorkbenchController extends ChangeNotifier {
 
   final WorkerTransport? _worker;
   final MediaPicker _mediaPicker;
+  final WorkspaceLauncher _workspaceLauncher;
+  final Directory _projectRoot;
   StreamSubscription<Map<String, dynamic>>? _workerSubscription;
   String? _activeRequestId;
   List<int> _requestTaskIndices = const [];
@@ -192,6 +220,8 @@ class WorkbenchController extends ChangeNotifier {
   bool running = false;
   String statusText = '正在连接 Python 后端';
   String lastError = '';
+  String transcriptPreview = '';
+  String transcriptSource = '';
   List<TaskSnapshot> tasks = const [];
   final List<String> logs = [];
 
@@ -214,6 +244,8 @@ class WorkbenchController extends ChangeNotifier {
   List<TaskSnapshot> get completedTasks =>
       tasks.where((task) => task.hasOutput).toList(growable: false);
 
+  String get projectRootPath => _projectRoot.path;
+
   double get overallProgress {
     if (tasks.isEmpty) {
       return 0;
@@ -227,7 +259,7 @@ class WorkbenchController extends ChangeNotifier {
     if (worker == null) {
       return;
     }
-    _workerSubscription = worker.messages.listen(_handleWorkerMessage);
+    _workerSubscription ??= worker.messages.listen(_handleWorkerMessage);
     try {
       await worker.start();
     } catch (error) {
@@ -244,6 +276,37 @@ class WorkbenchController extends ChangeNotifier {
 
   Future<void> pickDirectory() async {
     await _pick(_mediaPicker.pickDirectory);
+  }
+
+  void removeTask(TaskSnapshot task) {
+    if (running) {
+      return;
+    }
+    tasks = tasks.where((item) => item.path != task.path).toList();
+    statusText = tasks.isEmpty ? '任务列表已清空' : '已移除 ${task.name}';
+    notifyListeners();
+  }
+
+  void clearTasks() {
+    if (running || tasks.isEmpty) {
+      return;
+    }
+    tasks = const [];
+    transcriptPreview = '';
+    transcriptSource = '';
+    statusText = '任务列表已清空';
+    notifyListeners();
+  }
+
+  Future<void> reconnectWorker() async {
+    if (_worker == null || running) {
+      return;
+    }
+    workerReady = false;
+    lastError = '';
+    statusText = '正在重新连接 Python 后端';
+    notifyListeners();
+    await initialize();
   }
 
   Future<void> _pick(Future<List<String>> Function() picker) async {
@@ -342,7 +405,60 @@ class WorkbenchController extends ChangeNotifier {
     if (target == null || target.outputDir.isEmpty) {
       return;
     }
-    await Process.start('explorer.exe', [target.outputDir], runInShell: false);
+    await _workspaceLauncher.openDirectory(target.outputDir);
+  }
+
+  Future<void> openProjectDirectory() async {
+    await _workspaceLauncher.openDirectory(_projectRoot.path);
+  }
+
+  Future<void> openWorkspaceDirectory(String relativePath) async {
+    final directory = Directory(_joinPath(_projectRoot.path, relativePath));
+    if (!directory.existsSync()) {
+      lastError = '目录不存在：${directory.path}';
+      statusText = '无法打开目录';
+      notifyListeners();
+      return;
+    }
+    await _workspaceLauncher.openDirectory(directory.path);
+  }
+
+  Future<void> openWorkspaceFile(String relativePath) async {
+    final file = File(_joinPath(_projectRoot.path, relativePath));
+    if (!file.existsSync()) {
+      lastError = '文件不存在：${file.path}';
+      statusText = '无法打开文件';
+      notifyListeners();
+      return;
+    }
+    await _workspaceLauncher.openFile(file.path);
+  }
+
+  Future<void> loadTranscript([TaskSnapshot? task]) async {
+    final completed = completedTasks;
+    final target = task ?? (completed.isEmpty ? null : completed.last);
+    if (target == null || target.outputDir.isEmpty) {
+      transcriptPreview = '';
+      transcriptSource = '';
+      notifyListeners();
+      return;
+    }
+    final dot = target.name.lastIndexOf('.');
+    final stem = dot > 0 ? target.name.substring(0, dot) : target.name;
+    final transcript = File(_joinPath(target.outputDir, '$stem.ja.srt'));
+    if (!transcript.existsSync()) {
+      transcriptPreview = '';
+      transcriptSource = transcript.path;
+      lastError = '找不到日语字幕：${transcript.path}';
+      statusText = '转写稿尚未生成';
+      notifyListeners();
+      return;
+    }
+    transcriptPreview = await transcript.readAsString();
+    transcriptSource = transcript.path;
+    lastError = '';
+    statusText = '已加载 ${target.name} 的转写稿';
+    notifyListeners();
   }
 
   void _handleWorkerMessage(Map<String, dynamic> message) {
@@ -491,6 +607,9 @@ class WorkbenchController extends ChangeNotifier {
     _activeRequestId = null;
     _requestTaskIndices = const [];
     statusText = cancelled ? '任务已取消' : '本批任务处理完成';
+    if (!cancelled && completedTasks.isNotEmpty) {
+      unawaited(loadTranscript(completedTasks.last));
+    }
   }
 
   void _applyError(String message) {
@@ -533,6 +652,24 @@ String _basename(String path) {
   final normalized = path.replaceAll('\\', '/');
   return normalized.substring(normalized.lastIndexOf('/') + 1);
 }
+
+Directory _findProjectRoot() {
+  var directory = Directory.current;
+  for (var depth = 0; depth < 10; depth++) {
+    if (File(_joinPath(directory.path, 'asmr_worker.py')).existsSync()) {
+      return directory;
+    }
+    final parent = directory.parent;
+    if (parent.path == directory.path) {
+      break;
+    }
+    directory = parent;
+  }
+  return Directory.current;
+}
+
+String _joinPath(String parent, String child) =>
+    '$parent${Platform.pathSeparator}${child.replaceAll('/', Platform.pathSeparator)}';
 
 String _stageLabel(String stage) => switch (stage) {
   'audio' => '音频预处理',

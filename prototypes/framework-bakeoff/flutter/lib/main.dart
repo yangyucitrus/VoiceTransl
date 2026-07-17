@@ -162,6 +162,8 @@ class WorkbenchPage extends StatefulWidget {
   State<WorkbenchPage> createState() => _WorkbenchPageState();
 }
 
+enum _QuickAction { addFiles, scanDirectory, openProject, settings }
+
 class _WorkbenchPageState extends State<WorkbenchPage> {
   int selectedNav = 0;
   int selectedTab = 0;
@@ -187,6 +189,102 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     }
   }
 
+  String get _pageTitle =>
+      const ['工作台', '素材库', '词汇表', '导出记录', '设置'][selectedNav];
+
+  String get _pageSubtitle => switch (selectedNav) {
+    0 => '本次已完成 ${controller.completedTasks.length} 个音频',
+    1 => '已载入 ${controller.tasks.length} 个本地音视频文件',
+    2 => '维护转写纠错、翻译术语和译后替换',
+    3 => '本次会话共有 ${controller.completedTasks.length} 个可用输出',
+    _ => controller.workerReady ? 'Python 后端已连接' : 'Python 后端当前离线',
+  };
+
+  void _selectNavigation(int index) {
+    setState(() => selectedNav = index);
+  }
+
+  void _handleQuickAction(_QuickAction action) {
+    switch (action) {
+      case _QuickAction.addFiles:
+        unawaited(controller.pickFiles());
+      case _QuickAction.scanDirectory:
+        unawaited(controller.pickDirectory());
+      case _QuickAction.openProject:
+        unawaited(controller.openProjectDirectory());
+      case _QuickAction.settings:
+        _selectNavigation(4);
+    }
+  }
+
+  void _showActivityDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        final entries = controller.logs.isEmpty
+            ? [controller.statusText]
+            : controller.logs.reversed.take(100).toList(growable: false);
+        return AlertDialog(
+          key: const ValueKey('activity-dialog'),
+          title: const Row(
+            children: [
+              Icon(Icons.notifications_none_rounded, size: 20),
+              SizedBox(width: 10),
+              Text('运行记录'),
+            ],
+          ),
+          content: SizedBox(
+            width: 620,
+            height: 360,
+            child: ListView.separated(
+              itemCount: entries.length,
+              itemBuilder: (context, index) => SelectableText(
+                entries[index],
+                style: const TextStyle(
+                  color: VtColors.inkMuted,
+                  fontSize: 12,
+                  height: 1.45,
+                ),
+              ),
+              separatorBuilder: (context, index) => const Divider(height: 18),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildPage(BoxConstraints constraints) => switch (selectedNav) {
+    0 => Row(
+      key: const ValueKey('workbench-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: _QueuePane(
+            controller: controller,
+            selectedTab: selectedTab,
+            onTabSelected: (index) => setState(() => selectedTab = index),
+            onViewAll: () => _selectNavigation(3),
+          ),
+        ),
+        if (constraints.maxWidth >= 900) ...[
+          const SizedBox(width: 18),
+          SizedBox(width: 304, child: _AssistantPanel(controller: controller)),
+        ],
+      ],
+    ),
+    1 => _MediaLibraryPage(controller: controller),
+    2 => _DictionaryPage(controller: controller),
+    3 => _ExportHistoryPage(controller: controller),
+    _ => _SettingsPage(controller: controller),
+  };
+
   @override
   void dispose() {
     controller.removeListener(_handleControllerChanged);
@@ -201,40 +299,23 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     return Scaffold(
       body: Row(
         children: [
-          _Sidebar(
-            selectedIndex: selectedNav,
-            onSelected: (index) => setState(() => selectedNav = index),
-          ),
+          _Sidebar(selectedIndex: selectedNav, onSelected: _selectNavigation),
           Expanded(
             child: Column(
               children: [
-                _TopBar(controller: controller),
+                _TopBar(
+                  controller: controller,
+                  title: _pageTitle,
+                  subtitle: _pageSubtitle,
+                  onNotifications: _showActivityDialog,
+                  onQuickAction: _handleQuickAction,
+                ),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.all(22),
                     child: LayoutBuilder(
                       builder: (context, constraints) {
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Expanded(
-                              child: _QueuePane(
-                                controller: controller,
-                                selectedTab: selectedTab,
-                                onTabSelected: (index) {
-                                  setState(() => selectedTab = index);
-                                },
-                              ),
-                            ),
-                            if (constraints.maxWidth >= 900) ...[
-                              const SizedBox(width: 18),
-                              SizedBox(
-                                width: 304,
-                                child: _AssistantPanel(controller: controller),
-                              ),
-                            ],
-                          ],
-                        );
+                        return _buildPage(constraints);
                       },
                     ),
                   ),
@@ -485,9 +566,19 @@ class _LocalSummary extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.controller});
+  const _TopBar({
+    required this.controller,
+    required this.title,
+    required this.subtitle,
+    required this.onNotifications,
+    required this.onQuickAction,
+  });
 
   final WorkbenchController controller;
+  final String title;
+  final String subtitle;
+  final VoidCallback onNotifications;
+  final ValueChanged<_QuickAction> onQuickAction;
 
   @override
   Widget build(BuildContext context) {
@@ -504,9 +595,9 @@ class _TopBar extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                '工作台',
-                style: TextStyle(
+              Text(
+                title,
+                style: const TextStyle(
                   color: VtColors.ink,
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
@@ -515,7 +606,7 @@ class _TopBar extends StatelessWidget {
               ),
               const SizedBox(height: 2),
               Text(
-                '本次已完成 ${controller.completedTasks.length} 个音频',
+                subtitle,
                 style: const TextStyle(
                   color: VtColors.inkMuted,
                   fontSize: 11,
@@ -539,20 +630,58 @@ class _TopBar extends StatelessWidget {
           Tooltip(
             message: '通知',
             child: IconButton(
-              onPressed: () {},
+              onPressed: onNotifications,
               icon: const Icon(Icons.notifications_none_rounded, size: 20),
             ),
           ),
           const SizedBox(width: 4),
-          Tooltip(
-            message: '更多选项',
-            child: IconButton(
-              onPressed: () {},
-              icon: const Icon(Icons.more_horiz_rounded, size: 21),
-            ),
+          PopupMenuButton<_QuickAction>(
+            tooltip: '更多选项',
+            icon: const Icon(Icons.more_horiz_rounded, size: 21),
+            onSelected: onQuickAction,
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: _QuickAction.addFiles,
+                child: _MenuRow(icon: Icons.add_rounded, label: '添加音频'),
+              ),
+              PopupMenuItem(
+                value: _QuickAction.scanDirectory,
+                child: _MenuRow(
+                  icon: Icons.folder_open_outlined,
+                  label: '扫描目录',
+                ),
+              ),
+              PopupMenuItem(
+                value: _QuickAction.openProject,
+                child: _MenuRow(icon: Icons.source_outlined, label: '打开项目目录'),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: _QuickAction.settings,
+                child: _MenuRow(icon: Icons.settings_outlined, label: '设置'),
+              ),
+            ],
           ),
         ],
       ),
+    );
+  }
+}
+
+class _MenuRow extends StatelessWidget {
+  const _MenuRow({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: VtColors.inkMuted),
+        const SizedBox(width: 10),
+        Text(label),
+      ],
     );
   }
 }
@@ -562,11 +691,13 @@ class _QueuePane extends StatelessWidget {
     required this.controller,
     required this.selectedTab,
     required this.onTabSelected,
+    required this.onViewAll,
   });
 
   final WorkbenchController controller;
   final int selectedTab;
   final ValueChanged<int> onTabSelected;
+  final VoidCallback onViewAll;
 
   @override
   Widget build(BuildContext context) {
@@ -603,20 +734,711 @@ class _QueuePane extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 16),
-        _ActiveTask(
-          task: controller.activeTask,
-          running: controller.running,
-          onCancel: controller.cancel,
-          onOpenOutput: controller.openOutput,
+        Expanded(
+          child: selectedTab == 0
+              ? Column(
+                  key: const ValueKey('queue-page'),
+                  children: [
+                    _ActiveTask(
+                      task: controller.activeTask,
+                      running: controller.running,
+                      onCancel: controller.cancel,
+                      onOpenOutput: controller.openOutput,
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: _RecentOutputs(
+                        tasks: controller.completedTasks,
+                        onOpenOutput: controller.openOutput,
+                        onViewAll: onViewAll,
+                      ),
+                    ),
+                  ],
+                )
+              : _TranscriptPage(controller: controller),
+        ),
+      ],
+    );
+  }
+}
+
+class _TranscriptPage extends StatelessWidget {
+  const _TranscriptPage({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = controller.completedTasks;
+    return Container(
+      key: const ValueKey('transcript-page'),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 12, 12, 12),
+            child: Row(
+              children: [
+                const Text(
+                  '日语转写稿',
+                  style: TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    controller.transcriptSource.isEmpty
+                        ? '选择一个已完成任务读取 SRT'
+                        : controller.transcriptSource,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: VtColors.inkFaint,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '重新加载转写稿',
+                  onPressed: completed.isEmpty
+                      ? null
+                      : () => unawaited(controller.loadTranscript()),
+                  icon: const Icon(Icons.refresh_rounded, size: 19),
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          if (completed.isNotEmpty)
+            SizedBox(
+              height: 52,
+              child: ListView.separated(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 7,
+                ),
+                scrollDirection: Axis.horizontal,
+                itemCount: completed.length,
+                itemBuilder: (context, index) {
+                  final task = completed[index];
+                  return OutlinedButton.icon(
+                    onPressed: () => unawaited(controller.loadTranscript(task)),
+                    icon: const Icon(Icons.subtitles_outlined, size: 16),
+                    label: Text(task.name),
+                  );
+                },
+                separatorBuilder: (context, index) => const SizedBox(width: 8),
+              ),
+            ),
+          if (completed.isNotEmpty) const Divider(),
+          Expanded(
+            child: controller.transcriptPreview.isEmpty
+                ? const _PageEmptyState(
+                    icon: Icons.subtitles_outlined,
+                    title: '还没有可预览的转写稿',
+                    message: '完成一次转写后，可在这里读取并复制日语 SRT 内容',
+                  )
+                : SingleChildScrollView(
+                    padding: const EdgeInsets.all(20),
+                    child: SelectableText(
+                      controller.transcriptPreview,
+                      style: const TextStyle(
+                        color: VtColors.ink,
+                        fontSize: 13,
+                        height: 1.65,
+                        fontFamily: 'Microsoft YaHei UI',
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaLibraryPage extends StatelessWidget {
+  const _MediaLibraryPage({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('media-library-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            _SummaryMetric(
+              label: '全部素材',
+              value: '${controller.tasks.length}',
+              icon: Icons.audio_file_outlined,
+            ),
+            const SizedBox(width: 10),
+            _SummaryMetric(
+              label: '等待处理',
+              value:
+                  '${controller.tasks.where((task) => !task.isFinished).length}',
+              icon: Icons.schedule_rounded,
+            ),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: controller.running || controller.tasks.isEmpty
+                  ? null
+                  : controller.clearTasks,
+              icon: const Icon(Icons.clear_all_rounded, size: 18),
+              label: const Text('清空'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: controller.running ? null : controller.pickDirectory,
+              icon: const Icon(Icons.folder_open_outlined, size: 18),
+              label: const Text('扫描目录'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: controller.running ? null : controller.pickFiles,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('添加音频'),
+            ),
+          ],
         ),
         const SizedBox(height: 16),
         Expanded(
-          child: _RecentOutputs(
-            tasks: controller.completedTasks,
-            onOpenOutput: controller.openOutput,
+          child: Container(
+            decoration: BoxDecoration(
+              color: VtColors.surface,
+              border: Border.all(color: VtColors.border),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: controller.tasks.isEmpty
+                ? const _PageEmptyState(
+                    icon: Icons.library_music_outlined,
+                    title: '素材库为空',
+                    message: '添加音频或扫描本地目录后，文件会在这里统一管理',
+                  )
+                : ListView.separated(
+                    itemCount: controller.tasks.length,
+                    itemBuilder: (context, index) {
+                      final task = controller.tasks[index];
+                      return SizedBox(
+                        height: 72,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.audio_file_outlined,
+                                color: VtColors.pink,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      task.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: VtColors.ink,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      task.path,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: VtColors.inkFaint,
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              SizedBox(
+                                width: 150,
+                                child: LinearProgressIndicator(
+                                  value: task.progress,
+                                  minHeight: 5,
+                                  borderRadius: BorderRadius.circular(3),
+                                  color: VtColors.pink,
+                                  backgroundColor: VtColors.pinkSoft,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              SizedBox(
+                                width: 78,
+                                child: _StatusChip(
+                                  label: task.statusLabel,
+                                  foreground: _taskStatusForeground(task),
+                                  background: _taskStatusBackground(task),
+                                ),
+                              ),
+                              if (task.hasOutput)
+                                IconButton(
+                                  tooltip: '打开输出',
+                                  onPressed: () => controller.openOutput(task),
+                                  icon: const Icon(
+                                    Icons.folder_open_outlined,
+                                    size: 18,
+                                  ),
+                                )
+                              else
+                                IconButton(
+                                  tooltip: '移除素材',
+                                  onPressed: controller.running
+                                      ? null
+                                      : () => controller.removeTask(task),
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                    separatorBuilder: (context, index) => const Divider(),
+                  ),
           ),
         ),
       ],
+    );
+  }
+}
+
+class _DictionaryPage extends StatelessWidget {
+  const _DictionaryPage({required this.controller});
+
+  final WorkbenchController controller;
+
+  static const entries = [
+    (
+      '转写纠错词典',
+      '修正常见 ASR 错字、角色名和社团名',
+      'dictionaries/transcription_corrections.txt',
+      Icons.hearing_outlined,
+    ),
+    (
+      '翻译术语表',
+      '固定人物、关系和重复概念的中文译法',
+      'dictionaries/translation_glossary.txt',
+      Icons.translate_rounded,
+    ),
+    (
+      '译后替换词典',
+      '对翻译结果执行确定性的最终替换',
+      'dictionaries/post_translation_replacements.txt',
+      Icons.find_replace_rounded,
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('dictionary-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Text(
+              '本地词典文件',
+              style: TextStyle(
+                color: VtColors.ink,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const Spacer(),
+            OutlinedButton.icon(
+              onPressed: () =>
+                  controller.openWorkspaceDirectory('dictionaries'),
+              icon: const Icon(Icons.folder_open_outlined, size: 18),
+              label: const Text('打开词典目录'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        for (final entry in entries) ...[
+          Container(
+            height: 104,
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            decoration: BoxDecoration(
+              color: VtColors.surface,
+              border: Border.all(color: VtColors.border),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: VtColors.pinkSoft,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Icon(entry.$4, color: VtColors.pinkPressed, size: 21),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.$1,
+                        style: const TextStyle(
+                          color: VtColors.ink,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        entry.$2,
+                        style: const TextStyle(
+                          color: VtColors.inkMuted,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        entry.$3,
+                        style: const TextStyle(
+                          color: VtColors.inkFaint,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => controller.openWorkspaceFile(entry.$3),
+                  icon: const Icon(Icons.edit_outlined, size: 17),
+                  label: const Text('编辑'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+}
+
+class _ExportHistoryPage extends StatelessWidget {
+  const _ExportHistoryPage({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final tasks = controller.completedTasks;
+    return Container(
+      key: const ValueKey('export-history-page'),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 13, 12, 11),
+            child: Row(
+              children: [
+                Text(
+                  '本次会话输出 · ${tasks.length}',
+                  style: const TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                OutlinedButton.icon(
+                  onPressed: controller.openProjectDirectory,
+                  icon: const Icon(Icons.source_outlined, size: 17),
+                  label: const Text('项目目录'),
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          const _OutputHeader(),
+          const Divider(),
+          Expanded(
+            child: tasks.isEmpty
+                ? const _PageEmptyState(
+                    icon: Icons.outbox_outlined,
+                    title: '还没有导出记录',
+                    message: '完成的日语 SRT 和缓存结果会在这里集中显示',
+                  )
+                : ListView.separated(
+                    itemCount: tasks.length,
+                    itemBuilder: (context, index) => SizedBox(
+                      height: 74,
+                      child: _OutputRow(
+                        task: tasks[index],
+                        onOpenOutput: controller.openOutput,
+                      ),
+                    ),
+                    separatorBuilder: (context, index) => const Divider(),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsPage extends StatelessWidget {
+  const _SettingsPage({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('settings-page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: VtColors.surface,
+            border: Border.all(color: VtColors.border),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              _Dot(
+                color: controller.workerReady ? VtColors.green : VtColors.amber,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      controller.workerReady ? 'Python 后端已连接' : 'Python 后端离线',
+                      style: const TextStyle(
+                        color: VtColors.ink,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      controller.lastError.isEmpty
+                          ? controller.projectRootPath
+                          : controller.lastError,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: VtColors.inkMuted,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: controller.running
+                    ? null
+                    : controller.reconnectWorker,
+                icon: const Icon(Icons.sync_rounded, size: 18),
+                label: const Text('重新连接'),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _SettingsActionRow(
+          icon: Icons.tune_rounded,
+          title: '流水线设置',
+          subtitle: 'ASR、VAD、缓存、字幕格式与翻译接口',
+          actionLabel: '编辑 settings.yaml',
+          onPressed: () => controller.openWorkspaceFile('settings.yaml'),
+        ),
+        const SizedBox(height: 10),
+        _SettingsActionRow(
+          icon: Icons.memory_rounded,
+          title: '本地模型',
+          subtitle: '转写模型和 ASMR VAD 均从项目 models 目录读取',
+          actionLabel: '打开模型目录',
+          onPressed: () => controller.openWorkspaceDirectory('models'),
+        ),
+        const SizedBox(height: 10),
+        _SettingsActionRow(
+          icon: Icons.folder_copy_outlined,
+          title: '项目目录',
+          subtitle: controller.projectRootPath,
+          actionLabel: '在资源管理器中打开',
+          onPressed: controller.openProjectDirectory,
+        ),
+      ],
+    );
+  }
+}
+
+class _SettingsActionRow extends StatelessWidget {
+  const _SettingsActionRow({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.actionLabel,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String actionLabel;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 90,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: VtColors.pinkPressed, size: 22),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: VtColors.inkMuted,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          OutlinedButton(onPressed: onPressed, child: Text(actionLabel)),
+        ],
+      ),
+    );
+  }
+}
+
+class _SummaryMetric extends StatelessWidget {
+  const _SummaryMetric({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: VtColors.inkMuted),
+          const SizedBox(width: 7),
+          Text(
+            '$label  ',
+            style: const TextStyle(color: VtColors.inkMuted, fontSize: 11),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: VtColors.ink,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PageEmptyState extends StatelessWidget {
+  const _PageEmptyState({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 34, color: VtColors.pink),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            style: const TextStyle(
+              color: VtColors.ink,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: VtColors.inkMuted, fontSize: 11),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -944,10 +1766,15 @@ Color _taskStatusBackground(TaskSnapshot task) => switch (task.status) {
 };
 
 class _RecentOutputs extends StatelessWidget {
-  const _RecentOutputs({required this.tasks, required this.onOpenOutput});
+  const _RecentOutputs({
+    required this.tasks,
+    required this.onOpenOutput,
+    required this.onViewAll,
+  });
 
   final List<TaskSnapshot> tasks;
   final Future<void> Function([TaskSnapshot? task]) onOpenOutput;
+  final VoidCallback onViewAll;
 
   @override
   Widget build(BuildContext context) {
@@ -982,7 +1809,7 @@ class _RecentOutputs extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                TextButton(onPressed: () {}, child: const Text('查看全部')),
+                TextButton(onPressed: onViewAll, child: const Text('查看全部')),
               ],
             ),
           ),

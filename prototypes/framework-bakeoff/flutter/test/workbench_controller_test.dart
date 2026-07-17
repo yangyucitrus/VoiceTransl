@@ -56,6 +56,21 @@ class FakePicker implements MediaPicker {
   Future<List<String>> pickDirectory() async => paths;
 }
 
+class FakeWorkspaceLauncher implements WorkspaceLauncher {
+  String? openedDirectory;
+  String? openedFile;
+
+  @override
+  Future<void> openDirectory(String path) async {
+    openedDirectory = path;
+  }
+
+  @override
+  Future<void> openFile(String path) async {
+    openedFile = path;
+  }
+}
+
 void main() {
   test('runs a selected file and applies worker progress', () async {
     final worker = FakeWorker();
@@ -148,5 +163,38 @@ void main() {
 
     expect(spec.executable, endsWith(r'.venv\Scripts\python.exe'));
     expect(spec.arguments.last, endsWith('asmr_worker.py'));
+  });
+
+  test('manages queued media and launches workspace paths', () async {
+    final separator = Platform.pathSeparator;
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-actions-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final settings = File([root.path, 'settings.yaml'].join(separator))
+      ..writeAsStringSync('pipeline: {}');
+    final models = Directory([root.path, 'models'].join(separator))
+      ..createSync();
+    final launcher = FakeWorkspaceLauncher();
+    final controller = WorkbenchController(
+      worker: FakeWorker(),
+      mediaPicker: FakePicker([r'C:\audio\scene.wav']),
+      workspaceLauncher: launcher,
+      projectRoot: root,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.pickFiles();
+    expect(controller.tasks, hasLength(1));
+    controller.removeTask(controller.tasks.single);
+    expect(controller.tasks, isEmpty);
+
+    await controller.openWorkspaceFile('settings.yaml');
+    await controller.openWorkspaceDirectory('models');
+    await controller.openProjectDirectory();
+
+    expect(launcher.openedFile, settings.path);
+    expect(launcher.openedDirectory, root.path);
+    expect(models.existsSync(), isTrue);
   });
 }
