@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Branch = "",
-    [string]$Repository = "shinnpuru/VoiceTransl"
+    [string]$Repository = "yangyucitrus/VoiceTransl"
 )
 
 $ErrorActionPreference = "Stop"
