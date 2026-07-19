@@ -238,12 +238,25 @@ def process_one(
     if not vad_cached:
         log_lines.append("Running ASMR VAD")
         model_paths = config.settings["models"]
+
+        def report_vad_progress(progress: float) -> None:
+            _raise_if_cancelled(should_cancel)
+            _emit_event(
+                on_event,
+                "stage_progress",
+                stage="vad",
+                stage_index=2,
+                stage_count=stage_count,
+                progress=progress,
+            )
+
         vad_doc = detect_speech(
             audio_path,
             config.path_from_root(model_paths["whisper_vad_onnx"]),
             config.path_from_root(model_paths["whisper_vad_metadata"]),
             config.settings["vad"]["preset"],
             config.path_from_root(model_paths["whisper_base"]),
+            on_progress=report_vad_progress,
         )
         write_json(vad_path, vad_doc)
         finish_stage("vad", 2)

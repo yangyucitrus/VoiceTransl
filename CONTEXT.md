@@ -33,6 +33,7 @@ This fork narrows VoiceTransl into a Japanese ASMR subtitle workbench. It is not
 - Configuration is preset-driven. The GUI exposes approved ASR/VAD/device choices plus low, medium, and high transcription intensity instead of raw model parameters.
 - `.env` stores only secrets such as `VOICETRANSL_API_KEY`; `settings.yaml` stores product settings such as endpoint, model, presets, cache behavior, and model paths.
 - Translation preflight must prove that the configured model returns non-empty text and retry bounded transient failures. Requests to the official DeepSeek endpoint disable thinking mode for deterministic, economical subtitle translation.
+- The supervised Python worker loads native VAD dependencies on its main thread before reporting ready. VAD progress is chunk-based, cancellable between chunks, and visible with worker stderr in the Flutter live log.
 
 ## Translation Style
 

@@ -35,7 +35,5 @@ runtime/
 # Faster Whisper XXL
 _xxl_data
 project/config.yaml
-# Tests
-Tests
 GalTransl/
 files/

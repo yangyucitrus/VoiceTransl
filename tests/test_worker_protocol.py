@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
+import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, current_thread
 from time import sleep
+from unittest.mock import patch
 
 from asmr.config import load_config
 from asmr.pipeline import FileResult
 from asmr.transcribe import resolve_beam_size
-from asmr.worker_protocol import WorkerServer
+from asmr.worker_protocol import WorkerServer, serve_stdio
 
 
 class MessageCollector:
@@ -27,6 +31,38 @@ class MessageCollector:
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_serve_stdio_prepares_vad_runtime_on_main_thread_before_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            order: list[tuple[str, object]] = []
+            stdin = StringIO('{"command":"shutdown"}\n')
+            stdout = StringIO()
+            stderr = StringIO()
+            original_send_ready = WorkerServer.send_ready
+
+            def prepare_runtime() -> None:
+                order.append(("prepare", current_thread()))
+
+            def send_ready(server: WorkerServer) -> None:
+                order.append(("ready", current_thread()))
+                original_send_ready(server)
+
+            with (
+                patch("asmr.worker_protocol.prepare_vad_runtime", prepare_runtime),
+                patch.object(WorkerServer, "send_ready", send_ready),
+                patch.object(sys, "stdin", stdin),
+                patch.object(sys, "stdout", stdout),
+                patch.object(sys, "stderr", stderr),
+            ):
+                self.assertEqual(serve_stdio(Path(temp_dir)), 0)
+
+            self.assertEqual([item[0] for item in order], ["prepare", "ready"])
+            self.assertTrue(all(item[1] is current_thread() for item in order))
+            messages = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            self.assertEqual(
+                [message["type"] for message in messages],
+                ["log", "ready", "shutdown_ack"],
+            )
+
     def test_run_forwards_events_and_serializes_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

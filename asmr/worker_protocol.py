@@ -17,6 +17,7 @@ from .storage import (
     normalize_output_references,
     prepare_retry,
 )
+from .vad import prepare_vad_runtime
 
 
 PROTOCOL_VERSION = 1
@@ -463,6 +464,13 @@ def serve_stdio(root: Path | None = None) -> int:
             pass
 
     writer = JsonLineWriter(sys.stdout)
+    writer({"type": "log", "message": "正在初始化本地 VAD 运行时"})
+    try:
+        prepare_vad_runtime()
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        writer({"type": "error", "message": f"VAD runtime initialization failed: {exc}"})
+        return 1
     server = WorkerServer(root or Path(__file__).resolve().parents[1], writer)
     server.send_ready()
     for raw_line in sys.stdin:

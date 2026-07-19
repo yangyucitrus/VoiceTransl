@@ -28,6 +28,13 @@ newline-delimited JSON on standard input and output.
 - Pipeline events are forwarded without changing their existing payload shape.
 - Only one pipeline request runs at a time. Cancellation uses the existing safe
   pipeline checks rather than terminating the process immediately.
+- Native NumPy/ONNX VAD dependencies are initialized on the worker main thread
+  before the `ready` message. This avoids Windows native-loader deadlocks caused
+  by first importing OpenBLAS-backed modules inside the pipeline thread.
+- VAD inference reports progress and checks cancellation after each 30-second
+  audio chunk instead of presenting the whole stage as one opaque operation.
+- Flutter combines structured pipeline events and worker stderr into a bounded,
+  timestamped live log that remains readable while a task is running.
 - The first connected GUI slice runs transcription-only with cache reuse and no
   translation API preflight.
 - Development discovery prefers `.venv/Scripts/python.exe`; packaged discovery
@@ -41,6 +48,8 @@ newline-delimited JSON on standard input and output.
   behavior.
 - Worker crashes and protocol errors can be shown as task failures instead of
   crashing the GUI.
+- Slow initialization and long-running stages are visible rather than appearing
+  frozen at a stage boundary.
 - The worker can be tested with injected pipeline runners, while Flutter can
   test task state with a fake transport.
 - Distribution is a multi-file application inside one installer, not a single

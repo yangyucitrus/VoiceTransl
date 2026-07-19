@@ -163,13 +163,34 @@ void main() {
     expect(find.byKey(const ValueKey('queue-page')), findsNothing);
   });
 
-  testWidgets('notifications button opens the activity dialog', (tester) async {
-    await pumpWorkbench(tester);
-
-    await tester.tap(find.byTooltip('通知'));
+  testWidgets('live log button streams new worker lines while open', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final root = Directory.systemTemp.createTempSync('voicetransl-ui-log-');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final worker = UiFakeWorker();
+    final controller = WorkbenchController(worker: worker, projectRoot: root);
+    addTearDown(controller.dispose);
+    await tester.runAsync(controller.initialize);
+    await tester.pumpWidget(
+      VoiceTranslApp(demoMode: true, controller: controller),
+    );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('activity-dialog')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('live-log-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('live-log-dialog')), findsOneWidget);
+
+    worker.messagesController.add({
+      'type': 'log',
+      'message': 'VAD chunk 2/4',
+    });
+    await tester.pump();
+
+    expect(find.textContaining('VAD chunk 2/4'), findsOneWidget);
+    expect(find.byKey(const ValueKey('live-log-list')), findsOneWidget);
   });
 
   testWidgets('preflight failure leaves processing stages pending', (

@@ -217,46 +217,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     }
   }
 
-  void _showActivityDialog() {
+  void _showLiveLogDialog() {
     showDialog<void>(
       context: context,
-      builder: (context) {
-        final entries = controller.logs.isEmpty
-            ? [controller.statusText]
-            : controller.logs.reversed.take(100).toList(growable: false);
-        return AlertDialog(
-          key: const ValueKey('activity-dialog'),
-          title: const Row(
-            children: [
-              Icon(Icons.notifications_none_rounded, size: 20),
-              SizedBox(width: 10),
-              Text('运行记录'),
-            ],
-          ),
-          content: SizedBox(
-            width: 620,
-            height: 360,
-            child: ListView.separated(
-              itemCount: entries.length,
-              itemBuilder: (context, index) => SelectableText(
-                entries[index],
-                style: const TextStyle(
-                  color: VtColors.inkMuted,
-                  fontSize: 12,
-                  height: 1.45,
-                ),
-              ),
-              separatorBuilder: (context, index) => const Divider(height: 18),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('关闭'),
-            ),
-          ],
-        );
-      },
+      builder: (context) => _LiveLogDialog(controller: controller),
     );
   }
 
@@ -317,7 +281,7 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
                   controller: controller,
                   title: _pageTitle,
                   subtitle: _pageSubtitle,
-                  onNotifications: _showActivityDialog,
+                  onLiveLogs: _showLiveLogDialog,
                   onQuickAction: _handleQuickAction,
                 ),
                 Expanded(
@@ -589,14 +553,14 @@ class _TopBar extends StatelessWidget {
     required this.controller,
     required this.title,
     required this.subtitle,
-    required this.onNotifications,
+    required this.onLiveLogs,
     required this.onQuickAction,
   });
 
   final WorkbenchController controller;
   final String title;
   final String subtitle;
-  final VoidCallback onNotifications;
+  final VoidCallback onLiveLogs;
   final ValueChanged<_QuickAction> onQuickAction;
 
   @override
@@ -646,11 +610,16 @@ class _TopBar extends StatelessWidget {
                 : VtColors.amberSoft,
           ),
           const SizedBox(width: 10),
-          Tooltip(
-            message: '通知',
-            child: IconButton(
-              onPressed: onNotifications,
-              icon: const Icon(Icons.notifications_none_rounded, size: 20),
+          OutlinedButton.icon(
+            key: const ValueKey('live-log-button'),
+            onPressed: onLiveLogs,
+            icon: const Icon(Icons.terminal_rounded, size: 18),
+            label: const Text('实时日志'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: VtColors.inkMuted,
+              side: const BorderSide(color: VtColors.border),
+              minimumSize: const Size(112, 38),
+              padding: const EdgeInsets.symmetric(horizontal: 13),
             ),
           ),
           const SizedBox(width: 4),
@@ -684,6 +653,142 @@ class _TopBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _LiveLogDialog extends StatefulWidget {
+  const _LiveLogDialog({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  State<_LiveLogDialog> createState() => _LiveLogDialogState();
+}
+
+class _LiveLogDialogState extends State<_LiveLogDialog> {
+  final ScrollController _scrollController = ScrollController();
+  int _lastLogCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastLogCount = widget.controller.logs.length;
+    widget.controller.addListener(_handleControllerChanged);
+    _scheduleScrollToEnd();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LiveLogDialog oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_handleControllerChanged);
+      widget.controller.addListener(_handleControllerChanged);
+      _lastLogCount = widget.controller.logs.length;
+      _scheduleScrollToEnd();
+    }
+  }
+
+  void _handleControllerChanged() {
+    if (!mounted) {
+      return;
+    }
+    final shouldScroll = widget.controller.logs.length != _lastLogCount;
+    _lastLogCount = widget.controller.logs.length;
+    setState(() {});
+    if (shouldScroll) {
+      _scheduleScrollToEnd();
+    }
+  }
+
+  void _scheduleScrollToEnd() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_handleControllerChanged);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.controller.logs.isEmpty
+        ? ['等待运行日志 · ${widget.controller.statusText}']
+        : widget.controller.logs;
+    return AlertDialog(
+      key: const ValueKey('live-log-dialog'),
+      title: Row(
+        children: [
+          const Icon(Icons.terminal_rounded, size: 20),
+          const SizedBox(width: 10),
+          const Text('实时日志'),
+          const Spacer(),
+          const _Dot(color: VtColors.green),
+          const SizedBox(width: 6),
+          Text(
+            widget.controller.running ? '正在处理' : '实时',
+            style: const TextStyle(
+              color: VtColors.green,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0,
+            ),
+          ),
+        ],
+      ),
+      content: Container(
+        width: 720,
+        height: 430,
+        decoration: BoxDecoration(
+          color: VtColors.background,
+          border: Border.all(color: VtColors.border),
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: ListView.builder(
+          key: const ValueKey('live-log-list'),
+          controller: _scrollController,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+          itemCount: entries.length,
+          itemBuilder: (context, index) => Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: SelectableText(
+              entries[index],
+              style: const TextStyle(
+                color: VtColors.inkMuted,
+                fontFamily: 'Consolas',
+                fontSize: 11,
+                height: 1.5,
+                letterSpacing: 0,
+              ),
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          key: const ValueKey('clear-live-log-button'),
+          onPressed: widget.controller.logs.isEmpty
+              ? null
+              : widget.controller.clearLogs,
+          icon: const Icon(Icons.clear_all_rounded, size: 18),
+          label: const Text('清空'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
     );
   }
 }

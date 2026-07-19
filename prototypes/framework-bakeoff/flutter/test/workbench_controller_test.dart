@@ -260,6 +260,55 @@ void main() {
     expect(controller.canStart, isFalse);
   });
 
+  test('records structured stage progress in the live log', () async {
+    final worker = FakeWorker();
+    final controller = WorkbenchController(
+      worker: worker,
+      mediaPicker: FakePicker([r'C:\audio\scene.wav']),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+    await controller.pickFiles();
+    await controller.startTasks();
+    worker.emit({
+      'type': 'event',
+      'request_id': 'run-1',
+      'event': {
+        'type': 'stage_started',
+        'file_index': 0,
+        'file_count': 1,
+        'name': 'scene.wav',
+        'stage': 'vad',
+        'stage_index': 2,
+        'stage_count': 5,
+      },
+    });
+    worker.emit({
+      'type': 'event',
+      'request_id': 'run-1',
+      'event': {
+        'type': 'stage_progress',
+        'file_index': 0,
+        'stage': 'vad',
+        'stage_index': 2,
+        'stage_count': 5,
+        'progress': 0.5,
+      },
+    });
+    worker.emit({'type': 'log', 'message': 'native runtime line'});
+
+    expect(controller.activeTask?.progress, closeTo(0.3, 0.001));
+    expect(
+      controller.logs.any((line) => line.contains('ASMR 语音检测 50%')),
+      isTrue,
+    );
+    expect(controller.logs.last, contains('native runtime line'));
+
+    controller.clearLogs();
+    expect(controller.logs, isEmpty);
+  });
+
   test('forwards cancellation for the active request', () async {
     final worker = FakeWorker();
     final controller = WorkbenchController(

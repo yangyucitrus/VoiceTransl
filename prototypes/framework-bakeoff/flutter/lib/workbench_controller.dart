@@ -316,6 +316,7 @@ class WorkbenchController extends ChangeNotifier {
   Timer? _storageRefreshTimer;
   String? _activeRequestId;
   List<int> _requestTaskIndices = const [];
+  final Map<String, int> _lastLoggedStageProgress = {};
   List<TaskSnapshot> _history = const [];
   bool _workspaceStateLoaded = false;
   bool _disposed = false;
@@ -338,6 +339,14 @@ class WorkbenchController extends ChangeNotifier {
   String transcriptSource = '';
   List<TaskSnapshot> tasks = const [];
   final List<String> logs = [];
+
+  void clearLogs() {
+    if (logs.isEmpty) {
+      return;
+    }
+    logs.clear();
+    notifyListeners();
+  }
 
   bool get canStart =>
       workerReady &&
@@ -428,7 +437,7 @@ class WorkbenchController extends ChangeNotifier {
     try {
       await worker.start();
       if (!workerReady) {
-        await readySignal!.future.timeout(const Duration(seconds: 15));
+        await readySignal!.future.timeout(const Duration(seconds: 60));
       }
       await refreshRuntimeConfiguration();
       await refreshStorage();
@@ -990,6 +999,7 @@ class WorkbenchController extends ChangeNotifier {
         workerReady = true;
         statusText = tasks.isEmpty ? '后端已连接，请添加音频' : '后端已连接';
         lastError = '';
+        _appendLog('Python 后端已连接');
         final readySignal = _workerReadySignal;
         if (readySignal != null && !readySignal.isCompleted) {
           readySignal.complete();
@@ -1000,6 +1010,8 @@ class WorkbenchController extends ChangeNotifier {
       case 'accepted':
         running = true;
         statusText = '任务已进入处理队列';
+        _lastLoggedStageProgress.clear();
+        _appendLog('任务已进入处理队列');
       case 'event':
         final event = message['event'];
         if (event is Map) {
@@ -1009,6 +1021,7 @@ class WorkbenchController extends ChangeNotifier {
         _applyCompletion(message);
       case 'cancel_requested':
         statusText = '取消已请求，正在安全停止';
+        _appendLog('已请求取消，等待当前安全停止点');
       case 'error':
       case 'rejected':
       case 'protocol_error':
@@ -1018,13 +1031,11 @@ class WorkbenchController extends ChangeNotifier {
         running = false;
         statusText = 'Python 后端已退出';
         lastError = '退出代码：${message['exit_code']}';
+        _appendLog('Python 后端退出，代码 ${message['exit_code']}');
       case 'log':
         final line = message['message']?.toString();
         if (line != null && line.isNotEmpty) {
-          logs.add(line);
-          if (logs.length > 200) {
-            logs.removeRange(0, logs.length - 200);
-          }
+          _appendLog(line);
         }
     }
     notifyListeners();
@@ -1035,6 +1046,19 @@ class WorkbenchController extends ChangeNotifier {
     final requestIndex = (event['file_index'] as num?)?.toInt();
     if (eventType == 'batch_started') {
       statusText = '开始处理 ${event['file_count']} 个文件';
+      _appendLog(statusText);
+      return;
+    }
+    if (eventType == 'preflight_started') {
+      _appendLog('正在检查翻译接口');
+      return;
+    }
+    if (eventType == 'preflight_finished') {
+      _appendLog(event['message']?.toString() ?? '翻译接口检查完成');
+      return;
+    }
+    if (eventType == 'config_message') {
+      _appendLog(event['message']?.toString() ?? '配置已载入');
       return;
     }
     if (requestIndex == null ||
@@ -1051,6 +1075,7 @@ class WorkbenchController extends ChangeNotifier {
           task.copyWith(status: 'running', stage: '准备音频', progress: 0),
         );
         statusText = '正在处理 ${task.name}';
+        _appendLog('开始处理 ${task.name}');
       case 'stage_started':
         final stageIndex = (event['stage_index'] as num?)?.toInt() ?? 1;
         final stageCount = (event['stage_count'] as num?)?.toInt() ?? 1;
@@ -1065,6 +1090,7 @@ class WorkbenchController extends ChangeNotifier {
           ),
         );
         statusText = '${task.name} · ${_stageLabel(stageKey)}';
+        _appendLog('${task.name} · ${_stageLabel(stageKey)}开始');
       case 'stage_progress':
         final stageIndex = (event['stage_index'] as num?)?.toInt() ?? 1;
         final stageCount = (event['stage_count'] as num?)?.toInt() ?? 1;
@@ -1079,12 +1105,33 @@ class WorkbenchController extends ChangeNotifier {
             ),
           ),
         );
+        final percent = (stageProgress.clamp(0, 1) * 100).round();
+        final progressKey = '$requestIndex:${event['stage']}';
+        final previousPercent = _lastLoggedStageProgress[progressKey];
+        if (previousPercent == null ||
+            percent == 100 ||
+            percent - previousPercent >= 5) {
+          _lastLoggedStageProgress[progressKey] = percent;
+          final current = (event['current'] as num?)?.toInt();
+          final total = (event['total'] as num?)?.toInt();
+          final countLabel = current != null && total != null
+              ? ' · $current/$total'
+              : '';
+          _appendLog(
+            '${_stageLabel(event['stage']?.toString() ?? '')} $percent%$countLabel',
+          );
+        }
       case 'stage_finished':
         final stageIndex = (event['stage_index'] as num?)?.toInt() ?? 1;
         final stageCount = (event['stage_count'] as num?)?.toInt() ?? 1;
         _replaceTask(
           index,
           task.copyWith(progress: (stageIndex / stageCount).clamp(0, 1)),
+        );
+        _lastLoggedStageProgress.remove('$requestIndex:${event['stage']}');
+        final cached = event['cached'] == true ? '（复用缓存）' : '';
+        _appendLog(
+          '${_stageLabel(event['stage']?.toString() ?? '')}完成$cached',
         );
       case 'file_finished':
         final status = event['status']?.toString() ?? 'failed';
@@ -1101,6 +1148,7 @@ class WorkbenchController extends ChangeNotifier {
             format: status == 'success' ? '双语 SRT' : '日语 SRT',
           ),
         );
+        _appendLog('${task.name} · ${status == 'cancelled' ? '已取消' : '处理结束'}');
     }
   }
 
@@ -1138,6 +1186,8 @@ class WorkbenchController extends ChangeNotifier {
     _activeRequestId = null;
     _requestTaskIndices = const [];
     statusText = cancelled ? '任务已取消' : '本批任务处理完成';
+    _lastLoggedStageProgress.clear();
+    _appendLog(statusText);
     _recordHistory();
     _storageRefreshTimer?.cancel();
     _storageRefreshTimer = Timer(
@@ -1157,6 +1207,8 @@ class WorkbenchController extends ChangeNotifier {
     running = false;
     lastError = message;
     statusText = '处理失败';
+    _lastLoggedStageProgress.clear();
+    _appendLog('处理失败：$message');
     final index = tasks.indexWhere(
       (task) => task.status == 'running' || !task.isFinished,
     );
@@ -1170,6 +1222,22 @@ class WorkbenchController extends ChangeNotifier {
 
   void _replaceTask(int index, TaskSnapshot task) {
     tasks = [...tasks]..[index] = task;
+  }
+
+  void _appendLog(String message) {
+    final now = DateTime.now();
+    final timestamp =
+        '${_twoDigits(now.hour)}:${_twoDigits(now.minute)}:${_twoDigits(now.second)}';
+    final lines = message.replaceAll('\r', '\n').split('\n');
+    for (final rawLine in lines) {
+      final line = rawLine.trim();
+      if (line.isNotEmpty) {
+        logs.add('[$timestamp] $line');
+      }
+    }
+    if (logs.length > 500) {
+      logs.removeRange(0, logs.length - 500);
+    }
   }
 
   void _applyRuntimeConfiguration(Map<String, dynamic> message) {

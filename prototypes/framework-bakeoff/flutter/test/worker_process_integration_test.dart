@@ -55,7 +55,7 @@ void main() {
 
       final ready = client.messages
           .firstWhere((message) => message['type'] == 'ready')
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 60));
       await client.start();
       expect((await ready)['protocol'], 1);
 
