@@ -149,7 +149,10 @@ void main() {
       projectRoot: root,
     );
     addTearDown(controller.dispose);
-    await tester.pumpWidget(VoiceTranslApp(controller: controller));
+    await controller.initialize();
+    await tester.pumpWidget(
+      VoiceTranslApp(demoMode: true, controller: controller),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('设置').last);
