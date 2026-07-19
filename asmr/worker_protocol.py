@@ -11,6 +11,12 @@ from typing import Any, Callable, TextIO
 
 from .config import load_config, public_runtime_config, update_runtime_config
 from .pipeline import FileResult, PipelineCancelled, process_files
+from .storage import (
+    cleanup_outputs,
+    inspect_outputs,
+    normalize_output_references,
+    prepare_retry,
+)
 
 
 PROTOCOL_VERSION = 1
@@ -154,6 +160,86 @@ class WorkerServer:
                         "type": "config_saved",
                         "request_id": request_id,
                         "config": payload,
+                    }
+                )
+            return True
+        if command == "inspect_storage":
+            if request_id is None:
+                self._reject(None, "inspect_storage requires request_id")
+                return True
+            if self.running:
+                self._reject(
+                    request_id,
+                    "Storage cannot be inspected while a task is running",
+                )
+                return True
+            try:
+                references = normalize_output_references(message.get("items"))
+                payload = inspect_outputs(references)
+            except (OSError, TypeError, ValueError) as exc:
+                self._reject(request_id, str(exc))
+            else:
+                self._send(
+                    {
+                        "type": "storage",
+                        "request_id": request_id,
+                        **payload,
+                    }
+                )
+            return True
+        if command == "cleanup_outputs":
+            if request_id is None:
+                self._reject(None, "cleanup_outputs requires request_id")
+                return True
+            if self.running:
+                self._reject(
+                    request_id,
+                    "Outputs cannot be cleaned while a task is running",
+                )
+                return True
+            try:
+                references = normalize_output_references(message.get("items"))
+                payload = cleanup_outputs(
+                    references,
+                    str(message.get("mode", "")),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                self._reject(request_id, str(exc))
+            else:
+                self._send(
+                    {
+                        "type": "outputs_cleaned",
+                        "request_id": request_id,
+                        **payload,
+                    }
+                )
+            return True
+        if command == "prepare_retry":
+            if request_id is None:
+                self._reject(None, "prepare_retry requires request_id")
+                return True
+            if self.running:
+                self._reject(
+                    request_id,
+                    "A retry cannot be prepared while a task is running",
+                )
+                return True
+            try:
+                references = normalize_output_references(message.get("items"))
+                if len(references) != 1:
+                    raise ValueError("prepare_retry requires exactly one output item")
+                payload = prepare_retry(
+                    references[0],
+                    str(message.get("stage", "")),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                self._reject(request_id, str(exc))
+            else:
+                self._send(
+                    {
+                        "type": "retry_prepared",
+                        "request_id": request_id,
+                        **payload,
                     }
                 )
             return True

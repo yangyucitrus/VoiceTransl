@@ -52,6 +52,63 @@ class UiFakeWorker implements WorkerTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> inspectStorage(
+    List<Map<String, String>> items,
+  ) async => {
+    'type': 'storage',
+    'items': [
+      for (final item in items)
+        {
+          ...item,
+          'exists': true,
+          'final_bytes': 100,
+          'cache_bytes': 1000,
+          'reclaimable_bytes': 900,
+          'cache_state': 'tracked',
+        },
+    ],
+  };
+
+  @override
+  Future<Map<String, dynamic>> cleanupOutputs({
+    required List<Map<String, String>> items,
+    required String mode,
+  }) async => {
+    'type': 'outputs_cleaned',
+    'mode': mode,
+    'items': [
+      for (final item in items)
+        {
+          ...item,
+          'exists': mode != 'delete_result',
+          'final_bytes': mode == 'delete_result' ? 0 : 100,
+          'cache_bytes': 0,
+          'reclaimable_bytes': 0,
+          'cache_state': 'none',
+          'freed_bytes': 1000,
+          'deleted': mode == 'delete_result',
+        },
+    ],
+    'freed_bytes': 1000 * items.length,
+    'deleted_count': mode == 'delete_result' ? items.length : 0,
+  };
+
+  @override
+  Future<Map<String, dynamic>> prepareRetry({
+    required Map<String, String> item,
+    required String stage,
+  }) async => {
+    'type': 'retry_prepared',
+    'stage': stage,
+    ...item,
+    'exists': true,
+    'final_bytes': 0,
+    'cache_bytes': 0,
+    'reclaimable_bytes': 0,
+    'cache_state': 'none',
+  };
+
+  @override
   Future<String> run({
     required List<String> inputs,
     Map<String, dynamic> options = const {},
@@ -79,18 +136,18 @@ void main() {
 
     expect(find.byKey(const ValueKey('workbench-page')), findsOneWidget);
     const destinations = {
-      '素材库': 'media-library-page',
-      '词汇表': 'dictionary-page',
-      '导出记录': 'export-history-page',
-      '设置': 'settings-page',
+      1: 'media-library-page',
+      2: 'dictionary-page',
+      3: 'export-history-page',
+      4: 'settings-page',
     };
     for (final destination in destinations.entries) {
-      await tester.tap(find.text(destination.key));
+      await tester.tap(find.byKey(ValueKey('sidebar-nav-${destination.key}')));
       await tester.pumpAndSettle();
       expect(
         find.byKey(ValueKey(destination.value)),
         findsOneWidget,
-        reason: '${destination.key} should render its own page',
+        reason: 'destination ${destination.key} should render its own page',
       );
       expect(tester.takeException(), isNull);
     }
@@ -130,7 +187,7 @@ void main() {
     await tester.tap(find.byTooltip('更多选项'));
     await tester.pumpAndSettle();
     expect(find.text('打开项目目录'), findsOneWidget);
-    await tester.tap(find.text('设置').last);
+    await tester.tap(find.byKey(const ValueKey('quick-settings-action')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('settings-page')), findsOneWidget);
@@ -155,7 +212,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('设置').last);
+    await tester.tap(find.byKey(const ValueKey('sidebar-nav-4')));
     await tester.pumpAndSettle();
     expect(find.text('本地转写强度'), findsOneWidget);
     expect(find.text('中'), findsOneWidget);
@@ -201,5 +258,74 @@ void main() {
       find.byKey(const ValueKey('translation-config-dialog')),
       findsNothing,
     );
+  });
+
+  testWidgets('result library exposes storage and guarded cleanup actions', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final separator = Platform.pathSeparator;
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-ui-results-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final files = Directory([root.path, 'files'].join(separator))..createSync();
+    File([files.path, 'scene.wav'].join(separator)).writeAsStringSync('audio');
+    final output = Directory(
+      [files.path, 'scene.voicetransl'].join(separator),
+    )..createSync();
+    File(
+      [output.path, 'scene.ja.srt'].join(separator),
+    ).writeAsStringSync('subtitle');
+    final worker = UiFakeWorker();
+    final controller = WorkbenchController(worker: worker, projectRoot: root);
+    addTearDown(controller.dispose);
+    await tester.runAsync(controller.initialize);
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpWidget(
+      VoiceTranslApp(demoMode: true, controller: controller),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('sidebar-nav-3')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('成品 100 B'), findsOneWidget);
+    expect(find.textContaining('可清理 900 B'), findsOneWidget);
+    expect(find.text('可清 900 B'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('result-manage-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pumpAndSettle();
+    expect(find.text('已选 1 项'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('result-safe-clean-button')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('confirm-safe_cache')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('源音频'), findsNothing);
+    expect(find.textContaining('保留所有 SRT'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('更多结果操作'));
+    await tester.pumpAndSettle();
+    expect(find.text('仅重新翻译'), findsOneWidget);
+    expect(find.text('重新转写'), findsOneWidget);
+    expect(find.text('删除生成结果'), findsOneWidget);
+    await tester.tap(find.text('删除生成结果'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('confirm-delete_result')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('源音频不会被删除'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
   });
 }

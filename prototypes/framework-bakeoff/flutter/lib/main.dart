@@ -190,13 +190,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   }
 
   String get _pageTitle =>
-      const ['工作台', '素材库', '词汇表', '导出记录', '设置'][selectedNav];
+      const ['工作台', '任务队列', '词汇表', '结果库', '设置'][selectedNav];
 
   String get _pageSubtitle => switch (selectedNav) {
     0 => '已有 ${controller.completedTasks.length} 个可用输出',
-    1 => '已载入 ${controller.tasks.length} 个本地音视频文件',
+    1 => '本次会话已载入 ${controller.tasks.length} 个本地音视频文件',
     2 => '维护转写纠错、翻译术语和译后替换',
-    3 => '已持久化 ${controller.completedTasks.length} 条处理记录',
+    3 => '管理 ${controller.completedTasks.length} 项生成结果与中间缓存',
     _ => controller.workerReady ? 'Python 后端已连接' : 'Python 后端当前离线',
   };
 
@@ -281,8 +281,14 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     ),
     1 => _MediaLibraryPage(controller: controller),
     2 => _DictionaryPage(controller: controller),
-    3 => _ExportHistoryPage(controller: controller),
-    _ => _SettingsPage(controller: controller),
+    3 => _ExportHistoryPage(
+      controller: controller,
+      onOpenWorkbench: () => _selectNavigation(0),
+    ),
+    _ => _SettingsPage(
+      controller: controller,
+      onOpenResults: () => _selectNavigation(3),
+    ),
   };
 
   @override
@@ -349,9 +355,9 @@ class _Sidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     const items = [
       (Icons.space_dashboard_outlined, '工作台'),
-      (Icons.audio_file_outlined, '素材库'),
+      (Icons.audio_file_outlined, '任务队列'),
       (Icons.menu_book_outlined, '词汇表'),
-      (Icons.outbox_outlined, '导出记录'),
+      (Icons.outbox_outlined, '结果库'),
     ];
 
     return Container(
@@ -384,6 +390,7 @@ class _Sidebar extends StatelessWidget {
           const SizedBox(height: 8),
           for (var index = 0; index < items.length; index++)
             Padding(
+              key: ValueKey('sidebar-nav-$index'),
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
               child: _NavItem(
                 icon: items[index].$1,
@@ -400,6 +407,7 @@ class _Sidebar extends StatelessWidget {
           const SizedBox(height: 12),
           const Divider(),
           Padding(
+            key: const ValueKey('sidebar-nav-4'),
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
             child: _NavItem(
               icon: Icons.settings_outlined,
@@ -668,6 +676,7 @@ class _TopBar extends StatelessWidget {
               ),
               PopupMenuDivider(),
               PopupMenuItem(
+                key: const ValueKey('quick-settings-action'),
                 value: _QuickAction.settings,
                 child: _MenuRow(icon: Icons.settings_outlined, label: '设置'),
               ),
@@ -680,18 +689,23 @@ class _TopBar extends StatelessWidget {
 }
 
 class _MenuRow extends StatelessWidget {
-  const _MenuRow({required this.icon, required this.label});
+  const _MenuRow({
+    required this.icon,
+    required this.label,
+    this.color,
+  });
 
   final IconData icon;
   final String label;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, size: 18, color: VtColors.inkMuted),
+        Icon(icon, size: 18, color: color ?? VtColors.inkMuted),
         const SizedBox(width: 10),
-        Text(label),
+        Text(label, style: color == null ? null : TextStyle(color: color)),
       ],
     );
   }
@@ -936,8 +950,8 @@ class _MediaLibraryPage extends StatelessWidget {
             child: controller.tasks.isEmpty
                 ? const _PageEmptyState(
                     icon: Icons.library_music_outlined,
-                    title: '素材库为空',
-                    message: '添加音频或扫描本地目录后，文件会在这里统一管理',
+                    title: '任务队列为空',
+                    message: '添加音频或扫描本地目录后，本次任务会在这里统一处理',
                   )
                 : ListView.separated(
                     itemCount: controller.tasks.length,
@@ -1162,14 +1176,125 @@ class _DictionaryPage extends StatelessWidget {
   }
 }
 
-class _ExportHistoryPage extends StatelessWidget {
-  const _ExportHistoryPage({required this.controller});
+enum _ResultAction {
+  retryTranslation,
+  retryTranscription,
+  safeCleanup,
+  allCleanup,
+  deleteResult,
+}
+
+class _ExportHistoryPage extends StatefulWidget {
+  const _ExportHistoryPage({
+    required this.controller,
+    required this.onOpenWorkbench,
+  });
 
   final WorkbenchController controller;
+  final VoidCallback onOpenWorkbench;
+
+  @override
+  State<_ExportHistoryPage> createState() => _ExportHistoryPageState();
+}
+
+class _ExportHistoryPageState extends State<_ExportHistoryPage> {
+  final Set<String> selectedOutputs = {};
+  bool managing = false;
+
+  WorkbenchController get controller => widget.controller;
+
+  List<TaskSnapshot> _selectedTasks(List<TaskSnapshot> tasks) {
+    return tasks
+        .where((task) => selectedOutputs.contains(task.outputDir.toLowerCase()))
+        .toList(growable: false);
+  }
+
+  void _toggleSelection(TaskSnapshot task, bool selected) {
+    setState(() {
+      final key = task.outputDir.toLowerCase();
+      if (selected) {
+        selectedOutputs.add(key);
+      } else {
+        selectedOutputs.remove(key);
+      }
+    });
+  }
+
+  Future<void> _runCleanup(
+    List<TaskSnapshot> tasks,
+    OutputCleanupMode mode,
+  ) async {
+    if (tasks.isEmpty ||
+        !await _confirmOutputCleanup(context, tasks: tasks, mode: mode)) {
+      return;
+    }
+    try {
+      await controller.cleanOutputArtifacts(tasks, mode);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (mode == OutputCleanupMode.deleteResult) {
+          for (final task in tasks) {
+            selectedOutputs.remove(task.outputDir.toLowerCase());
+          }
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(controller.statusText)),
+      );
+    } catch (error) {
+      if (mounted) {
+        _showResultError(context, controller.lastError, error);
+      }
+    }
+  }
+
+  Future<void> _runRetry(TaskSnapshot task, RetryStage stage) async {
+    if (!await _confirmRetry(context, task: task, stage: stage)) {
+      return;
+    }
+    try {
+      await controller.retryTask(task, stage);
+      if (mounted) {
+        widget.onOpenWorkbench();
+      }
+    } catch (error) {
+      if (mounted) {
+        _showResultError(context, controller.lastError, error);
+      }
+    }
+  }
+
+  Future<void> _handleResultAction(
+    TaskSnapshot task,
+    _ResultAction action,
+  ) async {
+    switch (action) {
+      case _ResultAction.retryTranslation:
+        await _runRetry(task, RetryStage.translation);
+        return;
+      case _ResultAction.retryTranscription:
+        await _runRetry(task, RetryStage.transcription);
+        return;
+      case _ResultAction.safeCleanup:
+        await _runCleanup([task], OutputCleanupMode.safeCache);
+        return;
+      case _ResultAction.allCleanup:
+        await _runCleanup([task], OutputCleanupMode.allCache);
+        return;
+      case _ResultAction.deleteResult:
+        await _runCleanup([task], OutputCleanupMode.deleteResult);
+        return;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final tasks = controller.completedTasks;
+    final selected = _selectedTasks(tasks);
+    final canManage =
+        controller.workerReady && !controller.running && !controller.storageBusy;
     return Container(
       key: const ValueKey('export-history-page'),
       decoration: BoxDecoration(
@@ -1177,48 +1302,181 @@ class _ExportHistoryPage extends StatelessWidget {
         border: Border.all(color: VtColors.border),
         borderRadius: BorderRadius.circular(8),
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 13, 12, 11),
-            child: Row(
-              children: [
-                Text(
-                  '历史输出 · ${tasks.length}',
-                  style: const TextStyle(
-                    color: VtColors.ink,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                OutlinedButton.icon(
-                  onPressed: controller.openProjectDirectory,
-                  icon: const Icon(Icons.source_outlined, size: 17),
-                  label: const Text('项目目录'),
-                ),
-              ],
+          SizedBox(
+            height: 62,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: managing
+                  ? Row(
+                      children: [
+                        Checkbox(
+                          value: selected.isEmpty
+                              ? false
+                              : selected.length == tasks.length
+                              ? true
+                              : null,
+                          tristate: true,
+                          onChanged: canManage
+                              ? (_) => setState(() {
+                                  final selectAll =
+                                      selected.length != tasks.length;
+                                  selectedOutputs
+                                    ..clear()
+                                    ..addAll(
+                                      selectAll
+                                          ? tasks.map(
+                                              (task) => task.outputDir.toLowerCase(),
+                                            )
+                                          : const <String>[],
+                                    );
+                                })
+                              : null,
+                        ),
+                        Text(
+                          '已选 ${selected.length} 项',
+                          style: const TextStyle(
+                            color: VtColors.ink,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const Spacer(),
+                        OutlinedButton.icon(
+                          key: const ValueKey('result-safe-clean-button'),
+                          onPressed: canManage &&
+                                  selected.any(
+                                    (task) => task.reclaimableBytes > 0,
+                                  )
+                              ? () => unawaited(
+                                  _runCleanup(
+                                    selected,
+                                    OutputCleanupMode.safeCache,
+                                  ),
+                                )
+                              : null,
+                          icon: const Icon(Icons.cleaning_services_outlined, size: 17),
+                          label: const Text('安全清理'),
+                        ),
+                        const SizedBox(width: 8),
+                        PopupMenuButton<OutputCleanupMode>(
+                          key: const ValueKey('result-bulk-menu'),
+                          enabled: canManage && selected.isNotEmpty,
+                          tooltip: '更多批量操作',
+                          onSelected: (mode) =>
+                              unawaited(_runCleanup(selected, mode)),
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: OutputCleanupMode.allCache,
+                              child: _MenuRow(
+                                icon: Icons.delete_sweep_outlined,
+                                label: '清空全部缓存',
+                              ),
+                            ),
+                            PopupMenuDivider(),
+                            PopupMenuItem(
+                              value: OutputCleanupMode.deleteResult,
+                              child: _MenuRow(
+                                icon: Icons.delete_forever_outlined,
+                                label: '删除生成结果',
+                                color: Colors.redAccent,
+                              ),
+                            ),
+                          ],
+                          icon: const Icon(Icons.more_horiz_rounded),
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() {
+                            managing = false;
+                            selectedOutputs.clear();
+                          }),
+                          child: const Text('完成'),
+                        ),
+                      ],
+                    )
+                  : Row(
+                      children: [
+                        Text(
+                          '结果库 · ${tasks.length}',
+                          style: const TextStyle(
+                            color: VtColors.ink,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Text(
+                          '成品 ${formatByteSize(controller.totalFinalBytes)}  ·  '
+                          '缓存 ${formatByteSize(controller.totalCacheBytes)}  ·  '
+                          '可清理 ${formatByteSize(controller.totalReclaimableBytes)}',
+                          style: const TextStyle(
+                            color: VtColors.inkMuted,
+                            fontSize: 11,
+                          ),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: '重新统计占用',
+                          onPressed: canManage
+                              ? () => unawaited(controller.refreshStorage())
+                              : null,
+                          icon: const Icon(Icons.refresh_rounded, size: 18),
+                        ),
+                        TextButton.icon(
+                          key: const ValueKey('result-manage-button'),
+                          onPressed: canManage && tasks.isNotEmpty
+                              ? () => setState(() => managing = true)
+                              : null,
+                          icon: const Icon(Icons.checklist_rounded, size: 17),
+                          label: const Text('管理'),
+                        ),
+                        const SizedBox(width: 6),
+                        OutlinedButton.icon(
+                          onPressed: controller.openProjectDirectory,
+                          icon: const Icon(Icons.source_outlined, size: 17),
+                          label: const Text('项目目录'),
+                        ),
+                      ],
+                    ),
             ),
           ),
+          if (controller.storageBusy)
+            const LinearProgressIndicator(minHeight: 2),
           const Divider(),
-          const _OutputHeader(),
+          _HistoryOutputHeader(managing: managing),
           const Divider(),
           Expanded(
             child: tasks.isEmpty
                 ? const _PageEmptyState(
                     icon: Icons.outbox_outlined,
-                    title: '还没有导出记录',
-                    message: '完成的日语与双语 SRT 会跨启动保留在这里',
+                    title: '还没有生成结果',
+                    message: '完成的字幕会保留在这里，并可统一管理缓存和重试',
                   )
                 : ListView.separated(
                     itemCount: tasks.length,
-                    itemBuilder: (context, index) => SizedBox(
-                      height: 74,
-                      child: _OutputRow(
-                        task: tasks[index],
-                        onOpenOutput: controller.openOutput,
-                      ),
-                    ),
+                    itemBuilder: (context, index) {
+                      final task = tasks[index];
+                      return SizedBox(
+                        height: 78,
+                        child: _HistoryOutputRow(
+                          task: task,
+                          managing: managing,
+                          selected: selectedOutputs.contains(
+                            task.outputDir.toLowerCase(),
+                          ),
+                          enabled: canManage,
+                          translationRetryEnabled:
+                              canManage && controller.apiKeyConfigured,
+                          onSelected: (value) =>
+                              _toggleSelection(task, value),
+                          onOpenOutput: () => controller.openOutput(task),
+                          onAction: (action) =>
+                              unawaited(_handleResultAction(task, action)),
+                        ),
+                      );
+                    },
                     separatorBuilder: (context, index) => const Divider(),
                   ),
           ),
@@ -1228,10 +1486,364 @@ class _ExportHistoryPage extends StatelessWidget {
   }
 }
 
+class _HistoryOutputHeader extends StatelessWidget {
+  const _HistoryOutputHeader({required this.managing});
+
+  final bool managing;
+
+  @override
+  Widget build(BuildContext context) {
+    const style = TextStyle(
+      color: VtColors.inkFaint,
+      fontSize: 10,
+      fontWeight: FontWeight.w600,
+    );
+    return SizedBox(
+      height: 30,
+      child: Row(
+        children: [
+          SizedBox(width: managing ? 48 : 18),
+          const Expanded(flex: 5, child: Text('文件', style: style)),
+          const Expanded(flex: 2, child: Text('格式', style: style)),
+          const Expanded(flex: 2, child: Text('缓存', style: style)),
+          const Expanded(flex: 2, child: Text('完成时间', style: style)),
+          const SizedBox(width: 78, child: Text('状态', style: style)),
+          const SizedBox(width: 84, child: Text('操作', style: style)),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryOutputRow extends StatelessWidget {
+  const _HistoryOutputRow({
+    required this.task,
+    required this.managing,
+    required this.selected,
+    required this.enabled,
+    required this.translationRetryEnabled,
+    required this.onSelected,
+    required this.onOpenOutput,
+    required this.onAction,
+  });
+
+  final TaskSnapshot task;
+  final bool managing;
+  final bool selected;
+  final bool enabled;
+  final bool translationRetryEnabled;
+  final ValueChanged<bool> onSelected;
+  final VoidCallback onOpenOutput;
+  final ValueChanged<_ResultAction> onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final needsReview = task.status == 'translation_failed';
+    final cacheDetail = task.cacheState == 'unknown'
+        ? '等待统计'
+        : task.reclaimableBytes > 0
+        ? '可清 ${formatByteSize(task.reclaimableBytes)}'
+        : task.cacheBytes > 0
+        ? '保留缓存'
+        : '已清理';
+    return Row(
+      key: ValueKey('history-output-${task.outputDir}'),
+      children: [
+        if (managing)
+          SizedBox(
+            width: 48,
+            child: Checkbox(
+              value: selected,
+              onChanged: enabled ? (value) => onSelected(value == true) : null,
+            ),
+          )
+        else
+          const SizedBox(width: 18),
+        Expanded(
+          flex: 5,
+          child: Row(
+            children: [
+              const Icon(
+                Icons.description_outlined,
+                size: 17,
+                color: VtColors.inkMuted,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  task.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          flex: 2,
+          child: Text(
+            task.format,
+            style: const TextStyle(color: VtColors.inkMuted, fontSize: 11),
+          ),
+        ),
+        Expanded(
+          flex: 2,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                formatByteSize(task.cacheBytes),
+                style: const TextStyle(color: VtColors.ink, fontSize: 11),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                cacheDetail,
+                style: TextStyle(
+                  color: task.reclaimableBytes > 0
+                      ? VtColors.pinkPressed
+                      : VtColors.inkFaint,
+                  fontSize: 9,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          flex: 2,
+          child: Text(
+            task.completedLabel,
+            style: const TextStyle(color: VtColors.inkMuted, fontSize: 11),
+          ),
+        ),
+        SizedBox(
+          width: 78,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: _StatusChip(
+              label: needsReview ? '需校对' : task.statusLabel,
+              foreground: needsReview ? VtColors.amber : VtColors.green,
+              background: needsReview ? VtColors.amberSoft : VtColors.greenSoft,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 84,
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: '打开输出目录',
+                onPressed: onOpenOutput,
+                icon: const Icon(Icons.folder_open_outlined, size: 18),
+              ),
+              PopupMenuButton<_ResultAction>(
+                key: ValueKey('history-output-menu-${task.outputDir}'),
+                enabled: enabled,
+                tooltip: '更多结果操作',
+                onSelected: onAction,
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: _ResultAction.retryTranslation,
+                    enabled: translationRetryEnabled,
+                    child: const _MenuRow(
+                      icon: Icons.translate_rounded,
+                      label: '仅重新翻译',
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: _ResultAction.retryTranscription,
+                    child: _MenuRow(
+                      icon: Icons.graphic_eq_rounded,
+                      label: '重新转写',
+                    ),
+                  ),
+                  const PopupMenuDivider(),
+                  PopupMenuItem(
+                    value: _ResultAction.safeCleanup,
+                    enabled: task.reclaimableBytes > 0,
+                    child: const _MenuRow(
+                      icon: Icons.cleaning_services_outlined,
+                      label: '安全清理中间产物',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: _ResultAction.allCleanup,
+                    enabled: task.cacheBytes > 0,
+                    child: const _MenuRow(
+                      icon: Icons.delete_sweep_outlined,
+                      label: '清空全部缓存',
+                    ),
+                  ),
+                  const PopupMenuDivider(),
+                  const PopupMenuItem(
+                    value: _ResultAction.deleteResult,
+                    child: _MenuRow(
+                      icon: Icons.delete_forever_outlined,
+                      label: '删除生成结果',
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                ],
+                icon: const Icon(Icons.more_horiz_rounded, size: 19),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+Future<bool> _confirmOutputCleanup(
+  BuildContext context, {
+  required List<TaskSnapshot> tasks,
+  required OutputCleanupMode mode,
+}) async {
+  final bytes = switch (mode) {
+    OutputCleanupMode.safeCache => tasks.fold<int>(
+      0,
+      (total, task) => total + task.reclaimableBytes,
+    ),
+    OutputCleanupMode.allCache => tasks.fold<int>(
+      0,
+      (total, task) => total + task.cacheBytes,
+    ),
+    OutputCleanupMode.deleteResult => tasks.fold<int>(
+      0,
+      (total, task) => total + task.cacheBytes + task.finalBytes,
+    ),
+  };
+  final title = switch (mode) {
+    OutputCleanupMode.safeCache => '清理中间产物',
+    OutputCleanupMode.allCache => '清空全部缓存',
+    OutputCleanupMode.deleteResult => '删除生成结果',
+  };
+  final description = switch (mode) {
+    OutputCleanupMode.safeCache =>
+      '删除转换音频、ASR 分块和临时翻译工程。保留所有 SRT、日中 JSON、质量报告和运行日志。',
+    OutputCleanupMode.allCache =>
+      '删除整个 cache 目录，仅保留最终 SRT。以后重新处理时需要从源音频重新计算。',
+    OutputCleanupMode.deleteResult =>
+      '永久删除对应的 .voicetransl 结果目录和历史记录。源音频不会被删除。',
+  };
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: ValueKey('confirm-${mode.wireName}'),
+          title: Text(title),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${tasks.length} 项 · 预计释放 ${formatByteSize(bytes)}',
+                  style: const TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  description,
+                  style: const TextStyle(
+                    color: VtColors.inkMuted,
+                    fontSize: 12,
+                    height: 1.6,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              style: mode == OutputCleanupMode.deleteResult
+                  ? FilledButton.styleFrom(backgroundColor: Colors.redAccent)
+                  : null,
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: Icon(
+                mode == OutputCleanupMode.deleteResult
+                    ? Icons.delete_forever_outlined
+                    : Icons.cleaning_services_outlined,
+                size: 17,
+              ),
+              label: Text(title),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
+
+Future<bool> _confirmRetry(
+  BuildContext context, {
+  required TaskSnapshot task,
+  required RetryStage stage,
+}) async {
+  final translationOnly = stage == RetryStage.translation;
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: ValueKey('confirm-retry-${stage.wireName}'),
+          title: Text(translationOnly ? '仅重新翻译' : '重新转写'),
+          content: SizedBox(
+            width: 460,
+            child: Text(
+              translationOnly
+                  ? '将保留日语转写，清除旧翻译缓存后立即使用当前接口和词汇表重新翻译 ${task.name}。'
+                  : '将保留音频预处理和 VAD，清除旧转写及其后续结果后立即使用当前强度重新处理 ${task.name}。',
+              style: const TextStyle(
+                color: VtColors.inkMuted,
+                fontSize: 12,
+                height: 1.6,
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.refresh_rounded, size: 17),
+              label: const Text('立即重试'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
+
+void _showResultError(BuildContext context, String message, Object error) {
+  final detail = message.isEmpty ? error.toString() : message;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(detail),
+      backgroundColor: Colors.red.shade700,
+    ),
+  );
+}
+
 class _SettingsPage extends StatelessWidget {
-  const _SettingsPage({required this.controller});
+  const _SettingsPage({
+    required this.controller,
+    required this.onOpenResults,
+  });
 
   final WorkbenchController controller;
+  final VoidCallback onOpenResults;
 
   @override
   Widget build(BuildContext context) {
@@ -1310,6 +1922,19 @@ class _SettingsPage extends StatelessWidget {
                   controller: controller,
                 )
               : null,
+        ),
+        const SizedBox(height: 10),
+        _SettingsActionRow(
+          icon: Icons.storage_outlined,
+          title: '存储管理',
+          subtitle: controller.storageBusy
+              ? '正在统计生成结果与中间缓存'
+              : '${controller.completedTasks.length} 项结果 · '
+                    '成品 ${formatByteSize(controller.totalFinalBytes)} · '
+                    '缓存 ${formatByteSize(controller.totalCacheBytes)} · '
+                    '可清理 ${formatByteSize(controller.totalReclaimableBytes)}',
+          actionLabel: '管理结果',
+          onPressed: onOpenResults,
         ),
         const SizedBox(height: 10),
         _SettingsActionRow(

@@ -27,6 +27,25 @@ const _editableWorkspaceFiles = {
   'dictionaries/post_translation_replacements.txt',
 };
 
+enum OutputCleanupMode {
+  safeCache,
+  allCache,
+  deleteResult;
+
+  String get wireName => switch (this) {
+    OutputCleanupMode.safeCache => 'safe_cache',
+    OutputCleanupMode.allCache => 'all_cache',
+    OutputCleanupMode.deleteResult => 'delete_result',
+  };
+}
+
+enum RetryStage {
+  translation,
+  transcription;
+
+  String get wireName => name;
+}
+
 abstract interface class MediaPicker {
   Future<List<String>> pickFiles();
 
@@ -92,6 +111,10 @@ class TaskSnapshot {
     this.warnings = 0,
     this.completedAt = '',
     this.format = 'SRT',
+    this.finalBytes = 0,
+    this.cacheBytes = 0,
+    this.reclaimableBytes = 0,
+    this.cacheState = 'unknown',
   });
 
   final String path;
@@ -105,6 +128,10 @@ class TaskSnapshot {
   final int warnings;
   final String completedAt;
   final String format;
+  final int finalBytes;
+  final int cacheBytes;
+  final int reclaimableBytes;
+  final String cacheState;
 
   bool get isFinished => const {
     'success',
@@ -160,6 +187,10 @@ class TaskSnapshot {
     int? warnings,
     String? completedAt,
     String? format,
+    int? finalBytes,
+    int? cacheBytes,
+    int? reclaimableBytes,
+    String? cacheState,
   }) {
     return TaskSnapshot(
       path: path,
@@ -173,6 +204,10 @@ class TaskSnapshot {
       warnings: warnings ?? this.warnings,
       completedAt: completedAt ?? this.completedAt,
       format: format ?? this.format,
+      finalBytes: finalBytes ?? this.finalBytes,
+      cacheBytes: cacheBytes ?? this.cacheBytes,
+      reclaimableBytes: reclaimableBytes ?? this.reclaimableBytes,
+      cacheState: cacheState ?? this.cacheState,
     );
   }
 
@@ -188,6 +223,10 @@ class TaskSnapshot {
     'warnings': warnings,
     'completed_at': completedAt,
     'format': format,
+    'final_bytes': finalBytes,
+    'cache_bytes': cacheBytes,
+    'reclaimable_bytes': reclaimableBytes,
+    'cache_state': cacheState,
   };
 
   factory TaskSnapshot.fromJson(Map<String, dynamic> json) {
@@ -203,6 +242,10 @@ class TaskSnapshot {
       warnings: (json['warnings'] as num?)?.toInt() ?? 0,
       completedAt: json['completed_at']?.toString() ?? '',
       format: json['format']?.toString() ?? 'SRT',
+      finalBytes: (json['final_bytes'] as num?)?.toInt() ?? 0,
+      cacheBytes: (json['cache_bytes'] as num?)?.toInt() ?? 0,
+      reclaimableBytes: (json['reclaimable_bytes'] as num?)?.toInt() ?? 0,
+      cacheState: json['cache_state']?.toString() ?? 'unknown',
     );
   }
 }
@@ -280,6 +323,7 @@ class WorkbenchController extends ChangeNotifier {
   bool reuseCache = true;
   bool apiPreflight = true;
   bool configurationBusy = false;
+  bool storageBusy = false;
   bool apiKeyConfigured = false;
   String transcriptionIntensity = 'medium';
   String devicePreset = 'gpu_quality';
@@ -293,7 +337,10 @@ class WorkbenchController extends ChangeNotifier {
   final List<String> logs = [];
 
   bool get canStart =>
-      workerReady && tasks.any((task) => !task.isFinished) && !running;
+      workerReady &&
+      tasks.any((task) => !task.isFinished) &&
+      !running &&
+      !storageBusy;
 
   TaskSnapshot? get activeTask {
     for (final task in tasks) {
@@ -324,6 +371,21 @@ class WorkbenchController extends ChangeNotifier {
     }
     return completed;
   }
+
+  int get totalFinalBytes => completedTasks.fold(
+    0,
+    (total, task) => total + task.finalBytes,
+  );
+
+  int get totalCacheBytes => completedTasks.fold(
+    0,
+    (total, task) => total + task.cacheBytes,
+  );
+
+  int get totalReclaimableBytes => completedTasks.fold(
+    0,
+    (total, task) => total + task.reclaimableBytes,
+  );
 
   String get projectRootPath => _projectRoot.path;
 
@@ -505,6 +567,161 @@ class WorkbenchController extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshStorage() async {
+    final worker = _worker;
+    final outputs = completedTasks
+        .where((task) => task.outputDir.isNotEmpty)
+        .toList(growable: false);
+    if (worker == null || !workerReady || running || storageBusy) {
+      return;
+    }
+    if (outputs.isEmpty) {
+      return;
+    }
+    storageBusy = true;
+    notifyListeners();
+    try {
+      final response = await worker.inspectStorage(_outputItems(outputs));
+      _applyStorageReport(response);
+      await _saveHistory();
+    } catch (error) {
+      logs.add('读取结果占用失败：$error');
+    } finally {
+      storageBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<Map<String, dynamic>> cleanOutputArtifacts(
+    List<TaskSnapshot> selected,
+    OutputCleanupMode mode,
+  ) async {
+    final worker = _worker;
+    final outputs = _uniqueOutputs(selected);
+    if (worker == null ||
+        !workerReady ||
+        running ||
+        storageBusy ||
+        outputs.isEmpty) {
+      throw StateError('当前无法管理输出文件');
+    }
+    storageBusy = true;
+    lastError = '';
+    statusText = mode == OutputCleanupMode.deleteResult
+        ? '正在删除生成结果'
+        : '正在清理中间产物';
+    notifyListeners();
+    try {
+      final response = await worker.cleanupOutputs(
+        items: _outputItems(outputs),
+        mode: mode.wireName,
+      );
+      final freedBytes = (response['freed_bytes'] as num?)?.toInt() ?? 0;
+      if (mode == OutputCleanupMode.deleteResult) {
+        final deletedPaths = outputs
+            .map((task) => task.outputDir.toLowerCase())
+            .toSet();
+        _history = _history
+            .where(
+              (task) => !deletedPaths.contains(task.outputDir.toLowerCase()),
+            )
+            .toList();
+        tasks = tasks
+            .where(
+              (task) => !deletedPaths.contains(task.outputDir.toLowerCase()),
+            )
+            .toList();
+        if (deletedPaths.any(
+          (path) => transcriptSource.toLowerCase().startsWith(path),
+        )) {
+          transcriptPreview = '';
+          transcriptSource = '';
+        }
+        statusText = '已删除 ${outputs.length} 项生成结果';
+      } else {
+        _applyStorageReport(response);
+        statusText = '已释放 ${formatByteSize(freedBytes)}';
+      }
+      await _saveHistory();
+      return response;
+    } catch (error) {
+      lastError = error.toString();
+      statusText = mode == OutputCleanupMode.deleteResult
+          ? '删除生成结果失败'
+          : '清理中间产物失败';
+      rethrow;
+    } finally {
+      storageBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> retryTask(TaskSnapshot task, RetryStage stage) async {
+    final worker = _worker;
+    if (worker == null || !workerReady || running || storageBusy) {
+      throw StateError('Python 后端当前无法准备重试');
+    }
+    if (stage == RetryStage.translation && !apiKeyConfigured) {
+      throw StateError('请先配置翻译 API key');
+    }
+    if (!File(task.path).existsSync()) {
+      throw FileSystemException('源文件不存在，无法重试', task.path);
+    }
+    storageBusy = true;
+    lastError = '';
+    statusText = stage == RetryStage.translation
+        ? '正在准备重新翻译'
+        : '正在准备重新转写';
+    notifyListeners();
+    try {
+      final response = await worker.prepareRetry(
+        item: _outputItems([task]).single,
+        stage: stage.wireName,
+      );
+      final queued = task.copyWith(
+        status: 'queued',
+        stage: stage == RetryStage.translation ? '等待重新翻译' : '等待重新转写',
+        stageKey: '',
+        progress: 0,
+        error: '',
+        finalBytes: (response['final_bytes'] as num?)?.toInt() ?? 0,
+        cacheBytes: (response['cache_bytes'] as num?)?.toInt() ?? 0,
+        reclaimableBytes:
+            (response['reclaimable_bytes'] as num?)?.toInt() ?? 0,
+        cacheState: response['cache_state']?.toString() ?? 'unknown',
+      );
+      final outputKey = task.outputDir.toLowerCase();
+      _history = _history
+          .where((item) => item.outputDir.toLowerCase() != outputKey)
+          .toList();
+      final existing = tasks.indexWhere((item) => item.path == task.path);
+      int taskIndex;
+      if (existing >= 0) {
+        tasks = [...tasks]..[existing] = queued;
+        taskIndex = existing;
+      } else {
+        tasks = [...tasks, queued];
+        taskIndex = tasks.length - 1;
+      }
+      await _saveHistory();
+      storageBusy = false;
+      notifyListeners();
+      await _runTaskIndices(
+        [taskIndex],
+        transcribeOnly: stage == RetryStage.translation
+            ? false
+            : !translationEnabled,
+      );
+    } catch (error) {
+      lastError = error.toString();
+      statusText = '准备重试失败';
+      rethrow;
+    } finally {
+      storageBusy = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> reconnectWorker() async {
     if (_worker == null || running) {
       return;
@@ -557,13 +774,9 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> startTasks() async {
-    final worker = _worker;
-    if (!canStart || worker == null) {
+    if (!canStart) {
       return;
     }
-    running = true;
-    statusText = translationEnabled ? '正在提交转写与翻译任务' : '正在提交转写任务';
-    lastError = '';
     tasks = [
       for (final task in tasks)
         if (task.isFinished)
@@ -577,22 +790,38 @@ class WorkbenchController extends ChangeNotifier {
             error: '',
           ),
     ];
-    _requestTaskIndices = [
+    final indices = [
       for (var index = 0; index < tasks.length; index++)
         if (!tasks[index].isFinished) index,
     ];
+    await _runTaskIndices(indices, transcribeOnly: !translationEnabled);
+  }
+
+  Future<void> _runTaskIndices(
+    List<int> indices, {
+    required bool transcribeOnly,
+  }) async {
+    final worker = _worker;
+    if (worker == null || indices.isEmpty || running) {
+      return;
+    }
+    running = true;
+    statusText = transcribeOnly ? '正在提交转写任务' : '正在提交转写与翻译任务';
+    lastError = '';
+    _requestTaskIndices = indices;
     notifyListeners();
     try {
       _activeRequestId = await worker.run(
         inputs: [for (final index in _requestTaskIndices) tasks[index].path],
         options: {
-          'transcribe_only': !translationEnabled,
+          'transcribe_only': transcribeOnly,
           'reuse_cache': reuseCache,
           'skip_api_preflight': !apiPreflight,
         },
       );
     } catch (error) {
       running = false;
+      _requestTaskIndices = const [];
       lastError = error.toString();
       statusText = '任务提交失败';
       notifyListeners();
@@ -725,6 +954,7 @@ class WorkbenchController extends ChangeNotifier {
         statusText = tasks.isEmpty ? '后端已连接，请添加音频' : '后端已连接';
         lastError = '';
         unawaited(refreshRuntimeConfiguration());
+        unawaited(refreshStorage());
       case 'config':
       case 'config_saved':
         _applyRuntimeConfiguration(message);
@@ -870,6 +1100,12 @@ class WorkbenchController extends ChangeNotifier {
     _requestTaskIndices = const [];
     statusText = cancelled ? '任务已取消' : '本批任务处理完成';
     _recordHistory();
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 150),
+        refreshStorage,
+      ),
+    );
     if (!cancelled && completedTasks.isNotEmpty) {
       unawaited(loadTranscript(completedTasks.first));
     }
@@ -910,6 +1146,58 @@ class WorkbenchController extends ChangeNotifier {
     translationModel =
         config['translation_model']?.toString() ?? translationModel;
     apiKeyConfigured = config['api_key_configured'] == true;
+  }
+
+  void _applyStorageReport(Map<String, dynamic> response) {
+    final rawItems = response['items'];
+    if (rawItems is! List) {
+      return;
+    }
+    final reports = <String, Map<String, dynamic>>{};
+    for (final rawItem in rawItems) {
+      if (rawItem is! Map) {
+        continue;
+      }
+      final item = Map<String, dynamic>.from(rawItem);
+      final outputDir = item['output_dir']?.toString();
+      if (outputDir != null && outputDir.isNotEmpty) {
+        reports[outputDir.toLowerCase()] = item;
+      }
+    }
+
+    TaskSnapshot applyReport(TaskSnapshot task) {
+      final report = reports[task.outputDir.toLowerCase()];
+      if (report == null) {
+        return task;
+      }
+      return task.copyWith(
+        finalBytes: (report['final_bytes'] as num?)?.toInt() ?? 0,
+        cacheBytes: (report['cache_bytes'] as num?)?.toInt() ?? 0,
+        reclaimableBytes:
+            (report['reclaimable_bytes'] as num?)?.toInt() ?? 0,
+        cacheState: report['cache_state']?.toString() ?? 'unknown',
+      );
+    }
+
+    _history = _history.map(applyReport).toList();
+    tasks = tasks.map(applyReport).toList();
+  }
+
+  List<TaskSnapshot> _uniqueOutputs(Iterable<TaskSnapshot> selected) {
+    final seen = <String>{};
+    return selected
+        .where(
+          (task) =>
+              task.outputDir.isNotEmpty && seen.add(task.outputDir.toLowerCase()),
+        )
+        .toList(growable: false);
+  }
+
+  List<Map<String, String>> _outputItems(Iterable<TaskSnapshot> selected) {
+    return [
+      for (final task in _uniqueOutputs(selected))
+        {'input_path': task.path, 'output_dir': task.outputDir},
+    ];
   }
 
   void _recordHistory() {
@@ -1095,6 +1383,21 @@ String _extension(String path) {
   final name = _basename(path);
   final dot = name.lastIndexOf('.');
   return dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
+}
+
+String formatByteSize(int bytes) {
+  if (bytes < 1024) {
+    return '$bytes B';
+  }
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  var value = bytes / 1024;
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  final digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return '${value.toStringAsFixed(digits)} ${units[unitIndex]}';
 }
 
 String _twoDigits(int value) => value.toString().padLeft(2, '0');

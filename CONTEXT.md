@@ -13,6 +13,10 @@ This fork narrows VoiceTransl into a Japanese ASMR subtitle workbench. It is not
 - Translation glossary: The terms and naming guidance passed to the online translation model so character names, relationship terms, and repeated concepts translate consistently.
 - Post-translation replacement dictionary: A deterministic dictionary applied to Chinese output after translation.
 - Quality report: A lightweight deterministic report that flags obvious transcription and translation problems such as empty text, repeated segments, overlapping timestamps, leftover Japanese, and malformed output.
+- Task queue: The current session's local media inputs and their processing state. Removing an item from the queue does not delete its source file or generated result.
+- Result library: The persistent index of completed `.voicetransl` outputs. It owns output inspection, cache cleanup, result deletion, and stage-specific retry actions.
+- Regenerable cache: Intermediate audio, ASR chunks, partial checkpoints, and temporary translation projects that can be safely removed while final subtitles and structured JSON remain available.
+- Cache fingerprint: A per-stage digest of the source, models, presets, dictionaries, formatting, and translation configuration used to decide whether an existing artifact can be reused.
 
 ## Product Defaults
 
@@ -22,6 +26,9 @@ This fork narrows VoiceTransl into a Japanese ASMR subtitle workbench. It is not
 - Primary output is Japanese SRT, Chinese SRT, bilingual SRT, transcription JSON, and translation JSON.
 - Batch processing is supported, but v1 runs files serially.
 - Existing caches are reused by default.
+- A cache is reused only when its required files exist and its stage fingerprint still matches the current configuration.
+- Result history is persisted locally and reconciled with output directories discovered under `files/`.
+- Output management never deletes source media. Safe cleanup preserves SRT, Japanese/Chinese JSON, quality reports, and logs; result deletion is separately confirmed.
 - Models are placed manually under `models/`; v1 does not download large models from the UI.
 - Configuration is preset-driven. The GUI exposes approved ASR/VAD/device choices plus low, medium, and high transcription intensity instead of raw model parameters.
 - `.env` stores only secrets such as `VOICETRANSL_API_KEY`; `settings.yaml` stores product settings such as endpoint, model, presets, cache behavior, and model paths.

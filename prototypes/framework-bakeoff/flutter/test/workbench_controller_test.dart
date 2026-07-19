@@ -13,6 +13,9 @@ class FakeWorker implements WorkerTransport {
   Map<String, dynamic> lastOptions = const {};
   String? cancelledRequest;
   String? savedApiKey;
+  final List<String> cleanupModes = [];
+  final List<String> retryStages = [];
+  final Map<String, Map<String, dynamic>> storageByOutput = {};
   Map<String, dynamic> runtimeConfig = {
     'transcription_intensity': 'medium',
     'device_preset': 'gpu_quality',
@@ -74,6 +77,80 @@ class FakeWorker implements WorkerTransport {
       runtimeConfig['api_key_configured'] = true;
     }
     return {'type': 'config_saved', 'config': Map.of(runtimeConfig)};
+  }
+
+  Map<String, dynamic> _storageItem(Map<String, String> item) {
+    return {
+      'input_path': item['input_path'],
+      'output_dir': item['output_dir'],
+      'exists': true,
+      'final_bytes': 100,
+      'cache_bytes': 1000,
+      'reclaimable_bytes': 900,
+      'cache_state': 'tracked',
+      ...?storageByOutput[item['output_dir']],
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> inspectStorage(
+    List<Map<String, String>> items,
+  ) async {
+    final reports = items.map(_storageItem).toList();
+    return {
+      'type': 'storage',
+      'items': reports,
+      'summary': {
+        'result_count': reports.length,
+        'final_bytes': 100 * reports.length,
+        'cache_bytes': 1000 * reports.length,
+        'reclaimable_bytes': 900 * reports.length,
+      },
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> cleanupOutputs({
+    required List<Map<String, String>> items,
+    required String mode,
+  }) async {
+    cleanupModes.add(mode);
+    final deleted = mode == 'delete_result';
+    final reports = [
+      for (final item in items)
+        {
+          ..._storageItem(item),
+          'exists': !deleted,
+          'cache_bytes': mode == 'safe_cache' ? 100 : 0,
+          'reclaimable_bytes': 0,
+          'cache_state': mode == 'safe_cache' ? 'tracked' : 'none',
+          'freed_bytes': deleted ? 1100 : 900,
+          'deleted': deleted,
+        },
+    ];
+    return {
+      'type': 'outputs_cleaned',
+      'mode': mode,
+      'items': reports,
+      'freed_bytes': reports.length * (deleted ? 1100 : 900),
+      'deleted_count': deleted ? reports.length : 0,
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> prepareRetry({
+    required Map<String, String> item,
+    required String stage,
+  }) async {
+    retryStages.add(stage);
+    return {
+      'type': 'retry_prepared',
+      'stage': stage,
+      ..._storageItem(item),
+      'final_bytes': stage == 'translation' ? 50 : 0,
+      'cache_bytes': 100,
+      'reclaimable_bytes': 0,
+    };
   }
 
   @override
@@ -377,5 +454,119 @@ void main() {
       ).existsSync(),
       isTrue,
     );
+  });
+
+  test('refreshes storage, cleans cache, and removes deleted results', () async {
+    final separator = Platform.pathSeparator;
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-storage-controller-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final files = Directory([root.path, 'files'].join(separator))..createSync();
+    File([files.path, 'scene.wav'].join(separator)).writeAsStringSync('audio');
+    final output = Directory(
+      [files.path, 'scene.voicetransl'].join(separator),
+    )..createSync();
+    File(
+      [output.path, 'scene.ja.srt'].join(separator),
+    ).writeAsStringSync('subtitle');
+    final worker = FakeWorker();
+    final controller = WorkbenchController(
+      worker: worker,
+      mediaPicker: FakePicker(const []),
+      projectRoot: root,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+    await Future<void>.delayed(Duration.zero);
+    await controller.refreshStorage();
+
+    expect(controller.completedTasks, hasLength(1));
+    expect(controller.totalFinalBytes, 100);
+    expect(controller.totalCacheBytes, 1000);
+    expect(controller.totalReclaimableBytes, 900);
+
+    await controller.cleanOutputArtifacts(
+      controller.completedTasks,
+      OutputCleanupMode.safeCache,
+    );
+
+    expect(worker.cleanupModes, ['safe_cache']);
+    expect(controller.totalFinalBytes, 100);
+    expect(controller.totalCacheBytes, 100);
+    expect(controller.totalReclaimableBytes, 0);
+
+    await controller.cleanOutputArtifacts(
+      controller.completedTasks,
+      OutputCleanupMode.deleteResult,
+    );
+
+    expect(worker.cleanupModes, ['safe_cache', 'delete_result']);
+    expect(controller.completedTasks, isEmpty);
+    expect(controller.statusText, '已删除 1 项生成结果');
+  });
+
+  test('retries translation and transcription from the requested stage', () async {
+    final separator = Platform.pathSeparator;
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-retry-controller-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final files = Directory([root.path, 'files'].join(separator))..createSync();
+    final source = File([files.path, 'scene.wav'].join(separator))
+      ..writeAsStringSync('audio');
+    final output = Directory(
+      [files.path, 'scene.voicetransl'].join(separator),
+    )..createSync();
+    File(
+      [output.path, 'scene.combine.srt'].join(separator),
+    ).writeAsStringSync('subtitle');
+    final worker = FakeWorker();
+    worker.runtimeConfig['api_key_configured'] = true;
+    final controller = WorkbenchController(
+      worker: worker,
+      mediaPicker: FakePicker(const []),
+      projectRoot: root,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+    await Future<void>.delayed(Duration.zero);
+    await controller.retryTask(
+      controller.completedTasks.single,
+      RetryStage.translation,
+    );
+
+    expect(worker.retryStages, ['translation']);
+    expect(worker.lastInputs, [source.path]);
+    expect(worker.lastOptions['transcribe_only'], isFalse);
+    expect(controller.running, isTrue);
+
+    worker.emit({
+      'type': 'completed',
+      'request_id': 'run-1',
+      'cancelled': false,
+      'results': [
+        {
+          'input_path': source.path,
+          'name': 'scene.wav',
+          'status': 'success',
+          'output_dir': output.path,
+          'warnings': 0,
+          'error': null,
+        },
+      ],
+    });
+    await controller.setTranslationEnabled(false);
+    await controller.retryTask(
+      controller.completedTasks.single,
+      RetryStage.transcription,
+    );
+
+    expect(worker.retryStages, ['translation', 'transcription']);
+    expect(worker.lastInputs, [source.path]);
+    expect(worker.lastOptions['transcribe_only'], isTrue);
+    expect(controller.running, isTrue);
   });
 }

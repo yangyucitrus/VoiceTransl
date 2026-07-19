@@ -23,6 +23,20 @@ abstract interface class WorkerTransport {
     String? apiKey,
   });
 
+  Future<Map<String, dynamic>> inspectStorage(
+    List<Map<String, String>> items,
+  );
+
+  Future<Map<String, dynamic>> cleanupOutputs({
+    required List<Map<String, String>> items,
+    required String mode,
+  });
+
+  Future<Map<String, dynamic>> prepareRetry({
+    required Map<String, String> item,
+    required String stage,
+  });
+
   Future<void> close();
 }
 
@@ -226,6 +240,44 @@ class VoiceTranslWorkerClient implements WorkerTransport {
     );
   }
 
+  @override
+  Future<Map<String, dynamic>> inspectStorage(
+    List<Map<String, String>> items,
+  ) {
+    return _request(
+      'inspect_storage',
+      payload: {'items': items},
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> cleanupOutputs({
+    required List<Map<String, String>> items,
+    required String mode,
+  }) {
+    return _request(
+      'cleanup_outputs',
+      payload: {'items': items, 'mode': mode},
+      timeout: const Duration(minutes: 2),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> prepareRetry({
+    required Map<String, String> item,
+    required String stage,
+  }) {
+    return _request(
+      'prepare_retry',
+      payload: {
+        'items': [item],
+        'stage': stage,
+      },
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
   Future<void> ping() async {
     _send({
       'command': 'ping',
@@ -239,6 +291,7 @@ class VoiceTranslWorkerClient implements WorkerTransport {
   Future<Map<String, dynamic>> _request(
     String command, {
     Map<String, dynamic> payload = const {},
+    Duration timeout = const Duration(seconds: 10),
   }) {
     final requestId = _nextRequestId(command);
     final completer = Completer<Map<String, dynamic>>();
@@ -250,10 +303,10 @@ class VoiceTranslWorkerClient implements WorkerTransport {
       Error.throwWithStackTrace(error, stackTrace);
     }
     return completer.future.timeout(
-      const Duration(seconds: 10),
+      timeout,
       onTimeout: () {
         _pendingRequests.remove(requestId);
-        throw TimeoutException('Python worker 配置请求超时');
+        throw TimeoutException('Python worker 请求超时');
       },
     );
   }

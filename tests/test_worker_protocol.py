@@ -198,6 +198,60 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(resolve_beam_size("high"), 8)
         self.assertEqual(resolve_beam_size("unknown"), 5)
 
+    def test_storage_commands_inspect_and_clean_validated_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "scene.wav"
+            source.write_bytes(b"source")
+            output = root / "scene.voicetransl"
+            cache = output / "cache"
+            cache.mkdir(parents=True)
+            (cache / "audio.16k.wav").write_bytes(b"cached-audio")
+            (output / "scene.ja.srt").write_text("subtitle", encoding="utf-8")
+            collector = MessageCollector()
+            server = WorkerServer(root, collector)
+            items = [{"input_path": str(source), "output_dir": str(output)}]
+
+            server.handle_message(
+                {
+                    "command": "inspect_storage",
+                    "request_id": "storage-1",
+                    "items": items,
+                }
+            )
+            self.assertEqual(collector.messages[-1]["type"], "storage")
+            self.assertEqual(
+                collector.messages[-1]["summary"]["reclaimable_bytes"],
+                len(b"cached-audio"),
+            )
+
+            server.handle_message(
+                {
+                    "command": "cleanup_outputs",
+                    "request_id": "storage-2",
+                    "items": items,
+                    "mode": "safe_cache",
+                }
+            )
+            self.assertEqual(collector.messages[-1]["type"], "outputs_cleaned")
+            self.assertFalse((cache / "audio.16k.wav").exists())
+            self.assertTrue(source.exists())
+            self.assertTrue((output / "scene.ja.srt").exists())
+
+            (cache / "scene.ja.json").write_text("{}", encoding="utf-8")
+            (cache / "scene.zh.json").write_text("{}", encoding="utf-8")
+            server.handle_message(
+                {
+                    "command": "prepare_retry",
+                    "request_id": "retry-1",
+                    "items": items,
+                    "stage": "translation",
+                }
+            )
+            self.assertEqual(collector.messages[-1]["type"], "retry_prepared")
+            self.assertTrue((cache / "scene.ja.json").exists())
+            self.assertFalse((cache / "scene.zh.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

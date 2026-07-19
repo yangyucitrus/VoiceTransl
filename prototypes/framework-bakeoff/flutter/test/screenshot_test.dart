@@ -22,8 +22,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('任务队列'), findsOneWidget);
+    expect(find.byKey(const ValueKey('sidebar-nav-1')), findsOneWidget);
+    expect(find.text('任务队列'), findsNWidgets(2));
     expect(find.text('RJ01423376_track01.wav'), findsOneWidget);
     expect(find.text('声纹助手'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('sidebar-nav-3')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('export-history-page')), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

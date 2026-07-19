@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import shutil
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from .audio import to_wav_16k_mono
+from .cache_manifest import (
+    build_stage_fingerprints,
+    initialize_manifest,
+    is_stage_cache_valid,
+    record_stage,
+    write_manifest,
+)
 from .config import AppConfig, require_config_ready
 from .dictionaries import apply_replacements, load_replacements
 from .models import check_model_readiness
@@ -175,6 +183,12 @@ def process_one(
     ja_json_path = cache_dir / f"{stem}.ja.json"
     zh_json_path = cache_dir / f"{stem}.zh.json"
     quality_path = cache_dir / "quality_report.json"
+    fingerprints = build_stage_fingerprints(
+        config,
+        input_path,
+        transcribe_only=transcribe_only,
+    )
+    manifest = initialize_manifest(out_dir, input_path, config)
 
     stage_count = 5
 
@@ -200,15 +214,28 @@ def process_one(
         )
 
     begin_stage("audio", "Preparing 16 kHz mono audio", 1)
-    if no_cache or not audio_path.exists():
+    audio_cached = not no_cache and is_stage_cache_valid(
+        manifest,
+        "audio",
+        fingerprints["audio"],
+        (audio_path,),
+    )
+    if not audio_cached:
         log_lines.append("Converting audio to 16k mono wav")
         to_wav_16k_mono(input_path, audio_path, config.root)
         finish_stage("audio", 1)
     else:
         finish_stage("audio", 1, cached=True)
+    record_stage(out_dir, manifest, "audio", fingerprints["audio"])
 
     begin_stage("vad", "Detecting ASMR speech regions", 2)
-    if no_cache or not vad_path.exists():
+    vad_cached = not no_cache and is_stage_cache_valid(
+        manifest,
+        "vad",
+        fingerprints["vad"],
+        (vad_path,),
+    )
+    if not vad_cached:
         log_lines.append("Running ASMR VAD")
         model_paths = config.settings["models"]
         vad_doc = detect_speech(
@@ -223,10 +250,19 @@ def process_one(
     else:
         vad_doc = read_json(vad_path)
         finish_stage("vad", 2, cached=True)
+    record_stage(out_dir, manifest, "vad", fingerprints["vad"])
 
     begin_stage("asr", "Transcribing Japanese audio", 3)
-    if no_cache or not ja_json_path.exists():
+    asr_cached = not no_cache and is_stage_cache_valid(
+        manifest,
+        "asr",
+        fingerprints["asr"],
+        (ja_json_path,),
+    )
+    if not asr_cached:
         log_lines.append("Running Japanese ASR")
+        _remove_generated_path(cache_dir / "asr_chunks")
+        _remove_generated_path(cache_dir / "asr_partial.jsonl")
         model_paths = config.settings["models"]
         segments = transcribe_regions(
             config.root,
@@ -276,6 +312,7 @@ def process_one(
     else:
         ja_doc = read_json(ja_json_path)
         finish_stage("asr", 3, cached=True)
+    record_stage(out_dir, manifest, "asr", fingerprints["asr"])
 
     write_srt(out_dir / f"{stem}.ja.srt", ja_doc["segments"], "text")
 
@@ -284,10 +321,19 @@ def process_one(
     status = "transcribe_only" if transcribe_only else "success"
     begin_stage("translate", "Translating subtitles", 4)
     if not transcribe_only:
-        translate_cached = not no_cache and zh_json_path.exists()
+        translate_cached = not no_cache and is_stage_cache_valid(
+            manifest,
+            "translation",
+            fingerprints["translation"],
+            (zh_json_path,),
+        )
         try:
-            if no_cache or not zh_json_path.exists():
+            if not translate_cached:
                 log_lines.append("Running GalTransl translation")
+                _remove_generated_path(zh_json_path)
+                _remove_generated_path(cache_dir / "galtransl_project")
+                _remove_generated_path(out_dir / f"{stem}.zh.srt")
+                _remove_generated_path(out_dir / f"{stem}.combine.srt")
                 zh_doc = translate_with_galtransl(
                     config.root,
                     cache_dir,
@@ -313,6 +359,12 @@ def process_one(
                 fmt["combine_srt_zh_max_line_chars"],
             )
             finish_stage("translate", 4, cached=translate_cached)
+            record_stage(
+                out_dir,
+                manifest,
+                "translation",
+                fingerprints["translation"],
+            )
         except Exception as exc:
             translation_error = str(exc)
             status = "translation_failed"
@@ -326,6 +378,8 @@ def process_one(
                 error=translation_error,
             )
     else:
+        _remove_generated_path(out_dir / f"{stem}.zh.srt")
+        _remove_generated_path(out_dir / f"{stem}.combine.srt")
         _emit_event(
             on_event,
             "stage_skipped",
@@ -341,7 +395,18 @@ def process_one(
     (cache_dir / "run.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
     warnings = len([item for item in report["checks"] if item["severity"] == "warning"])
     finish_stage("quality", 5)
+    record_stage(out_dir, manifest, "quality", fingerprints["quality"])
+    manifest["last_status"] = status
+    manifest["warnings"] = warnings
+    write_manifest(out_dir, manifest)
     return FileResult(input_path, status, out_dir, warnings=warnings, error=translation_error)
+
+
+def _remove_generated_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def apply_transcription_dictionary(config: AppConfig, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
