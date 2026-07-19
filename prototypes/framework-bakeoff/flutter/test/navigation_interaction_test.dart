@@ -156,10 +156,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('本地转写强度'), findsOneWidget);
     expect(find.text('中'), findsOneWidget);
+    expect(controller.workerReady, isTrue);
+    expect(controller.configurationBusy, isFalse);
 
-    await tester.ensureVisible(find.text('高'));
+    final highIntensity = find.byKey(
+      const ValueKey('transcription-intensity-high'),
+    );
+    await tester.ensureVisible(highIntensity);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('高'));
+    await tester.tap(highIntensity);
     await tester.pumpAndSettle();
     expect(worker.intensity, 'high');
 

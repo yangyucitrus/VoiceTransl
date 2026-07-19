@@ -1496,21 +1496,78 @@ class _TranscriptionModelPanel extends StatelessWidget {
               ],
             ),
           ),
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'low', label: Text('低')),
-              ButtonSegment(value: 'medium', label: Text('中')),
-              ButtonSegment(value: 'high', label: Text('高')),
-            ],
-            selected: {controller.transcriptionIntensity},
-            showSelectedIcon: false,
-            onSelectionChanged: enabled
-                ? (selection) => unawaited(
-                    controller.setTranscriptionIntensity(selection.first),
-                  )
-                : null,
+          _TranscriptionIntensitySelector(
+            selected: controller.transcriptionIntensity,
+            enabled: enabled,
+            onSelected: (value) =>
+                unawaited(controller.setTranscriptionIntensity(value)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _TranscriptionIntensitySelector extends StatelessWidget {
+  const _TranscriptionIntensitySelector({
+    required this.selected,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  final String selected;
+  final bool enabled;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    const options = [('low', '低'), ('medium', '中'), ('high', '高')];
+    return Container(
+      height: 36,
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: VtColors.background,
+        border: Border.all(color: VtColors.borderStrong),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: options.map((option) {
+          final (value, label) = option;
+          final isSelected = selected == value;
+          return SizedBox(
+            key: ValueKey('transcription-intensity-$value'),
+            width: 42,
+            height: 30,
+            child: Material(
+              color: isSelected ? VtColors.surface : Colors.transparent,
+              borderRadius: BorderRadius.circular(5),
+              child: InkWell(
+                onTap: enabled && !isSelected
+                    ? () => onSelected(value)
+                    : null,
+                borderRadius: BorderRadius.circular(5),
+                hoverColor: VtColors.pinkSoft,
+                child: Center(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: !enabled
+                          ? VtColors.inkFaint
+                          : isSelected
+                          ? VtColors.pink
+                          : VtColors.inkMuted,
+                      fontSize: 12,
+                      fontWeight: isSelected
+                          ? FontWeight.w700
+                          : FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
