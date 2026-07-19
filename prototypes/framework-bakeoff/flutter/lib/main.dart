@@ -299,7 +299,11 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
     return Scaffold(
       body: Row(
         children: [
-          _Sidebar(selectedIndex: selectedNav, onSelected: _selectNavigation),
+          _Sidebar(
+            controller: controller,
+            selectedIndex: selectedNav,
+            onSelected: _selectNavigation,
+          ),
           Expanded(
             child: Column(
               children: [
@@ -331,8 +335,13 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
 }
 
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.selectedIndex, required this.onSelected});
+  const _Sidebar({
+    required this.controller,
+    required this.selectedIndex,
+    required this.onSelected,
+  });
 
+  final WorkbenchController controller;
   final int selectedIndex;
   final ValueChanged<int> onSelected;
 
@@ -384,9 +393,9 @@ class _Sidebar extends StatelessWidget {
               ),
             ),
           const Spacer(),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 18),
-            child: _LocalSummary(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            child: _LocalSummary(controller: controller),
           ),
           const SizedBox(height: 12),
           const Divider(),
@@ -519,7 +528,9 @@ class _NavItem extends StatelessWidget {
 }
 
 class _LocalSummary extends StatelessWidget {
-  const _LocalSummary();
+  const _LocalSummary({required this.controller});
+
+  final WorkbenchController controller;
 
   @override
   Widget build(BuildContext context) {
@@ -530,10 +541,10 @@ class _LocalSummary extends StatelessWidget {
         border: Border.all(color: VtColors.cyanSoft),
         borderRadius: BorderRadius.circular(7),
       ),
-      child: const Column(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          const Row(
             children: [
               Icon(Icons.memory_outlined, size: 17, color: VtColors.cyan),
               SizedBox(width: 7),
@@ -550,10 +561,10 @@ class _LocalSummary extends StatelessWidget {
               _Dot(color: VtColors.green),
             ],
           ),
-          SizedBox(height: 7),
+          const SizedBox(height: 7),
           Text(
-            'CUDA 已就绪 · medium',
-            style: TextStyle(
+            '${controller.localComputeLabel} · ${controller.transcriptionIntensityLabel}强度',
+            style: const TextStyle(
               color: VtColors.inkMuted,
               fontSize: 11,
               letterSpacing: 0,
@@ -1281,15 +1292,35 @@ class _SettingsPage extends StatelessWidget {
         const SizedBox(height: 16),
         _RuntimeModePanel(controller: controller),
         const SizedBox(height: 10),
+        _TranscriptionModelPanel(controller: controller),
+        const SizedBox(height: 10),
+        _SettingsActionRow(
+          icon: Icons.translate_rounded,
+          title: '翻译模型',
+          subtitle:
+              '${controller.translationModel} · ${controller.translationEndpoint} · '
+              '${controller.apiKeyConfigured ? '密钥已配置' : '未配置密钥'}',
+          actionLabel: '配置接口',
+          onPressed:
+              controller.workerReady &&
+                  !controller.running &&
+                  !controller.configurationBusy
+              ? () => _showTranslationConfigDialog(
+                  context,
+                  controller: controller,
+                )
+              : null,
+        ),
+        const SizedBox(height: 10),
         _SettingsActionRow(
           icon: Icons.tune_rounded,
-          title: '流水线设置',
-          subtitle: 'ASR、VAD、缓存、字幕格式与翻译接口',
-          actionLabel: '应用内编辑',
+          title: '高级配置文件',
+          subtitle: 'VAD、字幕合并、质量检查与模型路径',
+          actionLabel: '编辑 YAML',
           onPressed: () => _showWorkspaceTextEditor(
             context,
             controller: controller,
-            title: '流水线设置',
+            title: '高级配置文件',
             description: '直接编辑 settings.yaml，保存后对下一批任务生效',
             relativePath: 'settings.yaml',
           ),
@@ -1399,6 +1430,92 @@ class _RuntimeModePanel extends StatelessWidget {
   }
 }
 
+class _TranscriptionModelPanel extends StatelessWidget {
+  const _TranscriptionModelPanel({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final detail = switch (controller.transcriptionIntensity) {
+      'low' => '快速 · beam 1',
+      'high' => '精细 · beam 8',
+      _ => '均衡 · beam 5',
+    };
+    final enabled =
+        controller.workerReady &&
+        !controller.running &&
+        !controller.configurationBusy;
+    return Container(
+      height: 108,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: VtColors.cyanSoft,
+              borderRadius: BorderRadius.circular(7),
+            ),
+            child: const Icon(
+              Icons.graphic_eq_rounded,
+              color: VtColors.cyan,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '本地转写强度',
+                  style: TextStyle(
+                    color: VtColors.ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                const Text(
+                  'TransWithAI Whisper JA 1.5B',
+                  style: TextStyle(color: VtColors.inkMuted, fontSize: 11),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${controller.localComputeLabel} · $detail',
+                  style: const TextStyle(color: VtColors.inkFaint, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'low', label: Text('低')),
+              ButtonSegment(value: 'medium', label: Text('中')),
+              ButtonSegment(value: 'high', label: Text('高')),
+            ],
+            selected: {controller.transcriptionIntensity},
+            showSelectedIcon: false,
+            onSelectionChanged: enabled
+                ? (selection) => unawaited(
+                    controller.setTranscriptionIntensity(selection.first),
+                  )
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _CompactSwitchRow extends StatelessWidget {
   const _CompactSwitchRow({
     required this.title,
@@ -1449,6 +1566,233 @@ class _CompactSwitchRow extends StatelessWidget {
           Switch(value: value, onChanged: enabled ? onChanged : null),
         ],
       ),
+    );
+  }
+}
+
+Future<void> _showTranslationConfigDialog(
+  BuildContext context, {
+  required WorkbenchController controller,
+}) {
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => _TranslationConfigDialog(controller: controller),
+  );
+}
+
+class _TranslationConfigDialog extends StatefulWidget {
+  const _TranslationConfigDialog({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  State<_TranslationConfigDialog> createState() =>
+      _TranslationConfigDialogState();
+}
+
+class _TranslationConfigDialogState extends State<_TranslationConfigDialog> {
+  late final TextEditingController endpointController;
+  late final TextEditingController modelController;
+  final TextEditingController apiKeyController = TextEditingController();
+  bool obscureApiKey = true;
+  bool saving = false;
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    endpointController = TextEditingController(
+      text: widget.controller.translationEndpoint,
+    );
+    modelController = TextEditingController(
+      text: widget.controller.translationModel,
+    );
+  }
+
+  Future<void> _save() async {
+    final endpoint = endpointController.text.trim();
+    final model = modelController.text.trim();
+    final apiKey = apiKeyController.text.trim();
+    final uri = Uri.tryParse(endpoint);
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme) ||
+        uri.host.isEmpty) {
+      setState(() => error = '请输入以 http:// 或 https:// 开头的 API 地址');
+      return;
+    }
+    if (model.isEmpty) {
+      setState(() => error = '模型名称不能为空');
+      return;
+    }
+    if (!widget.controller.apiKeyConfigured && apiKey.isEmpty) {
+      setState(() => error = '首次配置需要填写 API key');
+      return;
+    }
+    setState(() {
+      saving = true;
+      error = '';
+    });
+    try {
+      await widget.controller.saveTranslationConfiguration(
+        endpoint: endpoint,
+        model: model,
+        apiKey: apiKey.isEmpty ? null : apiKey,
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (exception) {
+      if (mounted) {
+        setState(() {
+          saving = false;
+          error = exception.toString().replaceFirst('Bad state: ', '');
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    endpointController.dispose();
+    modelController.dispose();
+    apiKeyController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const ValueKey('translation-config-dialog'),
+      titlePadding: const EdgeInsets.fromLTRB(24, 20, 20, 10),
+      contentPadding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+      title: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: VtColors.pinkSoft,
+              borderRadius: BorderRadius.circular(7),
+            ),
+            child: const Icon(
+              Icons.translate_rounded,
+              size: 19,
+              color: VtColors.pinkPressed,
+            ),
+          ),
+          const SizedBox(width: 11),
+          const Expanded(child: Text('OpenAI 兼容翻译')),
+          IconButton(
+            tooltip: '关闭',
+            onPressed: saving ? null : () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close_rounded, size: 19),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 620,
+        height: 350,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '用于 OpenAI、DeepSeek、LM Studio、Ollama 等兼容接口',
+              style: TextStyle(color: VtColors.inkMuted, fontSize: 11),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              key: const ValueKey('translation-endpoint-field'),
+              controller: endpointController,
+              enabled: !saving,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: 'API 基础地址',
+                hintText: 'http://127.0.0.1:8000 或 https://api.openai.com',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('translation-model-field'),
+              controller: modelController,
+              enabled: !saving,
+              decoration: const InputDecoration(
+                labelText: '模型名称',
+                hintText: '例如 gpt-4.1-mini 或本地模型 ID',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('translation-api-key-field'),
+              controller: apiKeyController,
+              enabled: !saving,
+              obscureText: obscureApiKey,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'API key',
+                hintText: widget.controller.apiKeyConfigured
+                    ? '已配置，留空保持原密钥'
+                    : '请输入 API key',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  tooltip: obscureApiKey ? '显示密钥' : '隐藏密钥',
+                  onPressed: () => setState(
+                    () => obscureApiKey = !obscureApiKey,
+                  ),
+                  icon: Icon(
+                    obscureApiKey
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                    size: 19,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 9),
+            const Row(
+              children: [
+                Icon(Icons.lock_outline_rounded, size: 14, color: VtColors.cyan),
+                SizedBox(width: 6),
+                Text(
+                  '密钥只写入项目 .env，界面不会回显已保存值',
+                  style: TextStyle(color: VtColors.inkMuted, fontSize: 10),
+                ),
+              ],
+            ),
+            if (error.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                error,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: VtColors.pinkPressed, fontSize: 11),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: saving ? null : _save,
+          icon: saving
+              ? const SizedBox.square(
+                  dimension: 15,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.save_outlined, size: 17),
+          label: Text(saving ? '保存中' : '保存配置'),
+        ),
+      ],
     );
   }
 }
@@ -1671,7 +2015,7 @@ class _SettingsActionRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final String actionLabel;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -2452,8 +2796,14 @@ class _AssistantPanel extends StatelessWidget {
                 const SizedBox(height: 9),
                 const _SettingRow(label: '识别模型', value: 'Whisper JA 1.5B'),
                 _SettingRow(
-                  label: '运行模式',
-                  value: controller.translationEnabled ? '转写 + 翻译' : '仅转写',
+                  label: '转写强度',
+                  value: controller.transcriptionIntensityLabel,
+                ),
+                _SettingRow(
+                  label: '翻译模型',
+                  value: controller.translationEnabled
+                      ? controller.translationModel
+                      : '已关闭',
                 ),
                 _SettingRow(
                   label: '输出格式',
@@ -2614,15 +2964,19 @@ class _SettingRow extends StatelessWidget {
               letterSpacing: 0,
             ),
           ),
-          const Spacer(),
-          Text(
-            value,
-            maxLines: 1,
-            style: const TextStyle(
-              color: VtColors.ink,
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0,
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.end,
+              style: const TextStyle(
+                color: VtColors.ink,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 0,
+              ),
             ),
           ),
         ],

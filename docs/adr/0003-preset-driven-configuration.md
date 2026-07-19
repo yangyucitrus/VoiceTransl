@@ -17,6 +17,7 @@ Use `settings.yaml` as the shared configuration contract for the CLI and future 
 - ASR engine preset: `transwithai_whisper_ja`, with `sherpa_ja` reserved for experimental comparison.
 - VAD preset: `standard_asmr`, `whisper_sensitive`, `clean_conservative`.
 - Device preset: `auto`, `gpu_quality`, `gpu_low_vram`, `cpu`.
+- Transcription intensity: `low`, `medium`, `high`, mapped to beam sizes 1, 5, and 8. `medium` is the default.
 
 Raw VAD values and ASR compute details are resolved inside the pipeline from these presets. Advanced values may exist internally, but v1 does not expose them as GUI controls.
 

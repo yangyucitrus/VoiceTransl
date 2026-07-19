@@ -12,6 +12,14 @@ class FakeWorker implements WorkerTransport {
   List<String> lastInputs = const [];
   Map<String, dynamic> lastOptions = const {};
   String? cancelledRequest;
+  String? savedApiKey;
+  Map<String, dynamic> runtimeConfig = {
+    'transcription_intensity': 'medium',
+    'device_preset': 'gpu_quality',
+    'translation_endpoint': 'https://api.deepseek.com',
+    'translation_model': 'deepseek-v4-flash',
+    'api_key_configured': false,
+  };
   int startCount = 0;
 
   @override
@@ -38,6 +46,34 @@ class FakeWorker implements WorkerTransport {
   @override
   Future<void> cancel([String? requestId]) async {
     cancelledRequest = requestId;
+  }
+
+  @override
+  Future<Map<String, dynamic>> getConfiguration() async {
+    return {'type': 'config', 'config': Map.of(runtimeConfig)};
+  }
+
+  @override
+  Future<Map<String, dynamic>> saveConfiguration({
+    String? transcriptionIntensity,
+    String? translationEndpoint,
+    String? translationModel,
+    String? apiKey,
+  }) async {
+    if (transcriptionIntensity != null) {
+      runtimeConfig['transcription_intensity'] = transcriptionIntensity;
+    }
+    if (translationEndpoint != null) {
+      runtimeConfig['translation_endpoint'] = translationEndpoint;
+    }
+    if (translationModel != null) {
+      runtimeConfig['translation_model'] = translationModel;
+    }
+    if (apiKey != null && apiKey.isNotEmpty) {
+      savedApiKey = apiKey;
+      runtimeConfig['api_key_configured'] = true;
+    }
+    return {'type': 'config_saved', 'config': Map.of(runtimeConfig)};
   }
 
   @override
@@ -256,6 +292,34 @@ void main() {
     expect(second.translationEnabled, isFalse);
     expect(second.reuseCache, isFalse);
     expect(second.apiPreflight, isFalse);
+  });
+
+  test('loads and saves transcription and translation configuration', () async {
+    final worker = FakeWorker();
+    final controller = WorkbenchController(
+      worker: worker,
+      mediaPicker: FakePicker(const []),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.initialize();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.transcriptionIntensity, 'medium');
+    expect(controller.translationModel, 'deepseek-v4-flash');
+    expect(controller.apiKeyConfigured, isFalse);
+
+    await controller.setTranscriptionIntensity('high');
+    await controller.saveTranslationConfiguration(
+      endpoint: 'http://127.0.0.1:8000',
+      model: 'local-translator',
+      apiKey: 'local-secret',
+    );
+
+    expect(controller.transcriptionIntensity, 'high');
+    expect(controller.translationEndpoint, 'http://127.0.0.1:8000');
+    expect(controller.translationModel, 'local-translator');
+    expect(controller.apiKeyConfigured, isTrue);
+    expect(worker.savedApiKey, 'local-secret');
   });
 
   test('edits allowlisted workspace text without an external editor', () async {

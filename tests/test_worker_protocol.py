@@ -6,7 +6,9 @@ from pathlib import Path
 from threading import Event, Lock
 from time import sleep
 
+from asmr.config import load_config
 from asmr.pipeline import FileResult
+from asmr.transcribe import resolve_beam_size
 from asmr.worker_protocol import WorkerServer
 
 
@@ -122,6 +124,79 @@ class WorkerProtocolTests(unittest.TestCase):
 
         self.assertEqual(collector.messages[0]["type"], "pong")
         self.assertEqual(collector.messages[0]["protocol"], 1)
+
+    def test_reads_and_saves_runtime_configuration_without_echoing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            collector = MessageCollector()
+            server = WorkerServer(root, collector)
+
+            server.handle_message({"command": "get_config", "request_id": "config-1"})
+            initial = collector.messages[-1]
+            self.assertEqual(initial["type"], "config")
+            self.assertEqual(initial["config"]["transcription_intensity"], "medium")
+            self.assertFalse(initial["config"]["api_key_configured"])
+
+            server.handle_message(
+                {
+                    "command": "save_config",
+                    "request_id": "config-2",
+                    "config": {
+                        "transcription_intensity": "high",
+                        "translation_endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+                        "translation_model": "local-model",
+                        "api_key": "test-secret-key",
+                    },
+                }
+            )
+
+            saved = collector.messages[-1]
+            self.assertEqual(saved["type"], "config_saved")
+            self.assertEqual(saved["config"]["transcription_intensity"], "high")
+            self.assertEqual(
+                saved["config"]["translation_endpoint"],
+                "http://127.0.0.1:8000",
+            )
+            self.assertEqual(saved["config"]["translation_model"], "local-model")
+            self.assertTrue(saved["config"]["api_key_configured"])
+            self.assertNotIn("test-secret-key", repr(collector.messages))
+
+            config, _messages = load_config(root)
+            self.assertEqual(config.settings["asr"]["intensity"], "high")
+            self.assertEqual(config.api_key, "test-secret-key")
+
+            server.handle_message(
+                {
+                    "command": "save_config",
+                    "request_id": "config-2b",
+                    "config": {"translation_model": "replacement-model"},
+                }
+            )
+            preserved, _messages = load_config(root)
+            self.assertEqual(preserved.settings["translator"]["model"], "replacement-model")
+            self.assertEqual(preserved.api_key, "test-secret-key")
+
+    def test_rejects_invalid_runtime_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            collector = MessageCollector()
+            server = WorkerServer(Path(temp_dir), collector)
+
+            server.handle_message(
+                {
+                    "command": "save_config",
+                    "request_id": "config-3",
+                    "config": {"translation_endpoint": "localhost:8000"},
+                }
+            )
+
+            self.assertEqual(collector.messages[-1]["type"], "rejected")
+            self.assertIn("http://", collector.messages[-1]["message"])
+
+    def test_transcription_intensity_controls_beam_search(self) -> None:
+        self.assertEqual(resolve_beam_size("low"), 1)
+        self.assertEqual(resolve_beam_size("medium"), 5)
+        self.assertEqual(resolve_beam_size("high"), 8)
+        self.assertEqual(resolve_beam_size("unknown"), 5)
 
 
 if __name__ == "__main__":

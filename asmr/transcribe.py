@@ -38,6 +38,7 @@ def transcribe_regions(
     vad_doc: dict[str, Any],
     model_path: Path,
     device_preset: str,
+    intensity: str,
     work_dir: Path,
     partial_path: Path | None = None,
     limit_segments: int | None = None,
@@ -87,6 +88,7 @@ def transcribe_regions(
         raise RuntimeError("faster-whisper is not installed. Install requirements-asmr.txt.") from exc
 
     device, compute_type = resolve_device(device_preset)
+    beam_size = resolve_beam_size(intensity)
     model = WhisperModel(str(model_path), device=device, compute_type=compute_type)
     next_id = (max((seg["id"] for seg in results), default=0) + 1) if results else 1
     total = len(vad_segments)
@@ -108,7 +110,7 @@ def transcribe_regions(
             language="ja",
             task="transcribe",
             vad_filter=False,
-            beam_size=5,
+            beam_size=beam_size,
         )
         new_segs: list[dict[str, Any]] = []
         chunk_start = float(vad_seg["start"])
@@ -168,6 +170,10 @@ def resolve_device(preset: str) -> tuple[str, str]:
     if preset == "gpu_quality":
         return "cuda", "float16"
     return "auto", "auto"
+
+
+def resolve_beam_size(intensity: str) -> int:
+    return {"low": 1, "medium": 5, "high": 8}.get(intensity, 5)
 
 
 def _ensure_cuda_dlls() -> None:

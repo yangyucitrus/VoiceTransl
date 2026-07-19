@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .yaml_compat import safe_dump, safe_load
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "asr": {"engine": "transwithai_whisper_ja", "device_preset": "gpu_quality"},
+    "asr": {
+        "engine": "transwithai_whisper_ja",
+        "device_preset": "gpu_quality",
+        "intensity": "medium",
+    },
     "vad": {"preset": "standard_asmr"},
     "pipeline": {
         "reuse_cache": True,
@@ -51,6 +56,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "quality": {"enabled": True},
 }
+
+TRANSCRIPTION_INTENSITIES = frozenset({"low", "medium", "high"})
 
 
 @dataclass
@@ -95,6 +102,110 @@ def load_env_key(path: Path) -> str | None:
             value = line.split("=", 1)[1].strip()
             return value or None
     return None
+
+
+def normalize_openai_endpoint(raw_endpoint: str) -> str:
+    endpoint = raw_endpoint.strip().rstrip("/")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("API endpoint must be an http:// or https:// URL")
+    if parsed.query or parsed.fragment:
+        raise ValueError("API endpoint cannot contain a query string or fragment")
+    path = parsed.path.rstrip("/")
+    for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+def public_runtime_config(config: AppConfig) -> dict[str, Any]:
+    asr = config.settings.get("asr", {})
+    translator = config.settings.get("translator", {})
+    intensity = str(asr.get("intensity", "medium"))
+    if intensity not in TRANSCRIPTION_INTENSITIES:
+        intensity = "medium"
+    return {
+        "transcription_intensity": intensity,
+        "device_preset": str(asr.get("device_preset", "gpu_quality")),
+        "translation_endpoint": str(translator.get("endpoint", "")),
+        "translation_model": str(translator.get("model", "")),
+        "api_key_configured": bool(config.api_key),
+    }
+
+
+def update_runtime_config(root: Path, updates: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "transcription_intensity",
+        "translation_endpoint",
+        "translation_model",
+        "api_key",
+    }
+    unknown = set(updates) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported config fields: {', '.join(sorted(unknown))}")
+
+    config, _messages = load_config(root)
+    raw_settings = safe_load(config.settings_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw_settings, dict):
+        raise ValueError("settings.yaml must contain a mapping")
+
+    if "transcription_intensity" in updates:
+        intensity = str(updates["transcription_intensity"]).strip().lower()
+        if intensity not in TRANSCRIPTION_INTENSITIES:
+            raise ValueError("transcription_intensity must be low, medium, or high")
+        raw_settings.setdefault("asr", {})["intensity"] = intensity
+
+    translator = raw_settings.setdefault("translator", {})
+    if "translation_endpoint" in updates:
+        translator["endpoint"] = normalize_openai_endpoint(
+            str(updates["translation_endpoint"])
+        )
+    if "translation_model" in updates:
+        model = str(updates["translation_model"]).strip()
+        if not model:
+            raise ValueError("Translation model name cannot be empty")
+        translator["model"] = model
+
+    api_key: str | None = None
+    if "api_key" in updates:
+        raw_api_key = updates["api_key"]
+        if not isinstance(raw_api_key, str) or not raw_api_key.strip():
+            raise ValueError("API key cannot be empty")
+        if "\n" in raw_api_key or "\r" in raw_api_key:
+            raise ValueError("API key cannot contain a newline")
+        api_key = raw_api_key.strip()
+
+    _write_text_atomic(config.settings_path, safe_dump(raw_settings))
+
+    if api_key is not None:
+        _write_env_key(config.env_path, api_key)
+
+    updated, _messages = load_config(root)
+    return public_runtime_config(updated)
+
+
+def _write_env_key(path: Path, api_key: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    replacement = f"VOICETRANSL_API_KEY={api_key}"
+    output: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.strip().startswith("VOICETRANSL_API_KEY="):
+            if not replaced:
+                output.append(replacement)
+                replaced = True
+            continue
+        output.append(line)
+    if not replaced:
+        output.append(replacement)
+    _write_text_atomic(path, "\n".join(output) + "\n")
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    pending = path.with_name(f".{path.name}.tmp")
+    pending.write_text(content, encoding="utf-8")
+    pending.replace(path)
 
 
 def load_config(root: Path, settings_path: Path | None = None) -> tuple[AppConfig, list[str]]:

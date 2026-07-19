@@ -279,6 +279,12 @@ class WorkbenchController extends ChangeNotifier {
   bool translationEnabled = true;
   bool reuseCache = true;
   bool apiPreflight = true;
+  bool configurationBusy = false;
+  bool apiKeyConfigured = false;
+  String transcriptionIntensity = 'medium';
+  String devicePreset = 'gpu_quality';
+  String translationEndpoint = 'https://api.deepseek.com';
+  String translationModel = 'deepseek-v4-flash';
   String statusText = '正在连接 Python 后端';
   String lastError = '';
   String transcriptPreview = '';
@@ -320,6 +326,18 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   String get projectRootPath => _projectRoot.path;
+
+  String get transcriptionIntensityLabel => switch (transcriptionIntensity) {
+    'low' => '低',
+    'high' => '高',
+    _ => '中',
+  };
+
+  String get localComputeLabel => switch (devicePreset) {
+    'cpu' => 'CPU',
+    'gpu_low_vram' => 'CUDA 低显存',
+    _ => 'CUDA',
+  };
 
   double get overallProgress {
     if (tasks.isEmpty) {
@@ -408,11 +426,91 @@ class WorkbenchController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setTranscriptionIntensity(String value) async {
+    const allowed = {'low', 'medium', 'high'};
+    final worker = _worker;
+    if (!allowed.contains(value) ||
+        value == transcriptionIntensity ||
+        worker == null ||
+        !workerReady ||
+        running ||
+        configurationBusy) {
+      return;
+    }
+    final previous = transcriptionIntensity;
+    transcriptionIntensity = value;
+    configurationBusy = true;
+    lastError = '';
+    notifyListeners();
+    try {
+      final response = await worker.saveConfiguration(
+        transcriptionIntensity: value,
+      );
+      _applyRuntimeConfiguration(response);
+      statusText = '转写强度已设为 $transcriptionIntensityLabel';
+    } catch (error) {
+      transcriptionIntensity = previous;
+      lastError = error.toString();
+      statusText = '保存转写强度失败';
+    } finally {
+      configurationBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> saveTranslationConfiguration({
+    required String endpoint,
+    required String model,
+    String? apiKey,
+  }) async {
+    final worker = _worker;
+    if (worker == null || !workerReady || running || configurationBusy) {
+      throw StateError('Python 后端当前无法保存配置');
+    }
+    configurationBusy = true;
+    lastError = '';
+    notifyListeners();
+    try {
+      final response = await worker.saveConfiguration(
+        translationEndpoint: endpoint.trim(),
+        translationModel: model.trim(),
+        apiKey: apiKey?.trim(),
+      );
+      _applyRuntimeConfiguration(response);
+      statusText = '翻译模型配置已保存';
+    } catch (error) {
+      lastError = error.toString();
+      statusText = '保存翻译模型失败';
+      rethrow;
+    } finally {
+      configurationBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> refreshRuntimeConfiguration() async {
+    final worker = _worker;
+    if (worker == null || !workerReady || configurationBusy) {
+      return;
+    }
+    configurationBusy = true;
+    notifyListeners();
+    try {
+      _applyRuntimeConfiguration(await worker.getConfiguration());
+    } catch (error) {
+      logs.add('读取运行配置失败：$error');
+    } finally {
+      configurationBusy = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> reconnectWorker() async {
     if (_worker == null || running) {
       return;
     }
     if (workerReady) {
+      await refreshRuntimeConfiguration();
       lastError = '';
       statusText = 'Python 后端连接正常';
       notifyListeners();
@@ -575,6 +673,9 @@ class WorkbenchController extends ChangeNotifier {
     lastError = '';
     statusText = '已保存 ${_basename(normalized)}';
     notifyListeners();
+    if (normalized == 'settings.yaml') {
+      await refreshRuntimeConfiguration();
+    }
   }
 
   Future<void> loadTranscript([TaskSnapshot? task]) async {
@@ -623,6 +724,10 @@ class WorkbenchController extends ChangeNotifier {
         workerReady = true;
         statusText = tasks.isEmpty ? '后端已连接，请添加音频' : '后端已连接';
         lastError = '';
+        unawaited(refreshRuntimeConfiguration());
+      case 'config':
+      case 'config_saved':
+        _applyRuntimeConfiguration(message);
       case 'accepted':
         running = true;
         statusText = '任务已进入处理队列';
@@ -787,6 +892,24 @@ class WorkbenchController extends ChangeNotifier {
 
   void _replaceTask(int index, TaskSnapshot task) {
     tasks = [...tasks]..[index] = task;
+  }
+
+  void _applyRuntimeConfiguration(Map<String, dynamic> message) {
+    final rawConfig = message['config'];
+    if (rawConfig is! Map) {
+      return;
+    }
+    final config = Map<String, dynamic>.from(rawConfig);
+    final intensity = config['transcription_intensity']?.toString();
+    if (const {'low', 'medium', 'high'}.contains(intensity)) {
+      transcriptionIntensity = intensity!;
+    }
+    devicePreset = config['device_preset']?.toString() ?? devicePreset;
+    translationEndpoint =
+        config['translation_endpoint']?.toString() ?? translationEndpoint;
+    translationModel =
+        config['translation_model']?.toString() ?? translationModel;
+    apiKeyConfigured = config['api_key_configured'] == true;
   }
 
   void _recordHistory() {

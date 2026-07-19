@@ -23,7 +23,7 @@ This fork narrows VoiceTransl into a Japanese ASMR subtitle workbench. It is not
 - Batch processing is supported, but v1 runs files serially.
 - Existing caches are reused by default.
 - Models are placed manually under `models/`; v1 does not download large models from the UI.
-- Configuration is preset-driven. The GUI should expose ASR engine, VAD preset, and device preset choices instead of raw model or VAD parameters.
+- Configuration is preset-driven. The GUI exposes approved ASR/VAD/device choices plus low, medium, and high transcription intensity instead of raw model parameters.
 - `.env` stores only secrets such as `VOICETRANSL_API_KEY`; `settings.yaml` stores product settings such as endpoint, model, presets, cache behavior, and model paths.
 
 ## Translation Style

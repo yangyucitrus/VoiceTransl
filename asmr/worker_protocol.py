@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Callable, TextIO
 
-from .config import load_config
+from .config import load_config, public_runtime_config, update_runtime_config
 from .pipeline import FileResult, PipelineCancelled, process_files
 
 
@@ -112,6 +112,50 @@ class WorkerServer:
                     "protocol": PROTOCOL_VERSION,
                 }
             )
+            return True
+        if command == "get_config":
+            if request_id is None:
+                self._reject(None, "get_config requires request_id")
+                return True
+            try:
+                config, _messages = load_config(self.root)
+                payload = public_runtime_config(config)
+            except Exception as exc:
+                self._reject(request_id, str(exc))
+            else:
+                self._send(
+                    {
+                        "type": "config",
+                        "request_id": request_id,
+                        "config": payload,
+                    }
+                )
+            return True
+        if command == "save_config":
+            if request_id is None:
+                self._reject(None, "save_config requires request_id")
+                return True
+            with self._state_lock:
+                busy = self._thread is not None and self._thread.is_alive()
+            if busy:
+                self._reject(request_id, "Configuration cannot change while a task is running")
+                return True
+            raw_config = message.get("config")
+            if not isinstance(raw_config, dict):
+                self._reject(request_id, "save_config requires a config object")
+                return True
+            try:
+                payload = update_runtime_config(self.root, raw_config)
+            except (OSError, TypeError, ValueError) as exc:
+                self._reject(request_id, str(exc))
+            else:
+                self._send(
+                    {
+                        "type": "config_saved",
+                        "request_id": request_id,
+                        "config": payload,
+                    }
+                )
             return True
         if command == "run":
             self._start_request(message, request_id)

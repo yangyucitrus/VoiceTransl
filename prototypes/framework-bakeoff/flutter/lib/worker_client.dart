@@ -14,6 +14,15 @@ abstract interface class WorkerTransport {
 
   Future<void> cancel([String? requestId]);
 
+  Future<Map<String, dynamic>> getConfiguration();
+
+  Future<Map<String, dynamic>> saveConfiguration({
+    String? transcriptionIntensity,
+    String? translationEndpoint,
+    String? translationModel,
+    String? apiKey,
+  });
+
   Future<void> close();
 }
 
@@ -119,6 +128,7 @@ class VoiceTranslWorkerClient implements WorkerTransport {
   StreamSubscription<String>? _stderrSubscription;
   bool _closing = false;
   int _requestCounter = 0;
+  final Map<String, Completer<Map<String, dynamic>>> _pendingRequests = {};
 
   @override
   Stream<Map<String, dynamic>> get messages => _messages.stream;
@@ -153,6 +163,14 @@ class VoiceTranslWorkerClient implements WorkerTransport {
     unawaited(
       process.exitCode.then((exitCode) {
         _process = null;
+        for (final pending in _pendingRequests.values) {
+          if (!pending.isCompleted) {
+            pending.completeError(
+              StateError('Python worker 已退出（代码 $exitCode）'),
+            );
+          }
+        }
+        _pendingRequests.clear();
         if (!_closing && !_messages.isClosed) {
           _messages.add({'type': 'worker_exit', 'exit_code': exitCode});
         }
@@ -165,8 +183,7 @@ class VoiceTranslWorkerClient implements WorkerTransport {
     required List<String> inputs,
     Map<String, dynamic> options = const {},
   }) async {
-    final requestId =
-        'run-${DateTime.now().microsecondsSinceEpoch}-${_requestCounter++}';
+    final requestId = _nextRequestId('run');
     _send({
       'command': 'run',
       'request_id': requestId,
@@ -181,11 +198,64 @@ class VoiceTranslWorkerClient implements WorkerTransport {
     _send({'command': 'cancel', 'request_id': requestId});
   }
 
+  @override
+  Future<Map<String, dynamic>> getConfiguration() {
+    return _request('get_config');
+  }
+
+  @override
+  Future<Map<String, dynamic>> saveConfiguration({
+    String? transcriptionIntensity,
+    String? translationEndpoint,
+    String? translationModel,
+    String? apiKey,
+  }) {
+    return _request(
+      'save_config',
+      payload: {
+        'config': {
+          if (transcriptionIntensity != null)
+            'transcription_intensity': transcriptionIntensity,
+          if (translationEndpoint != null)
+            'translation_endpoint': translationEndpoint,
+          if (translationModel != null) 'translation_model': translationModel,
+          if (apiKey != null && apiKey.trim().isNotEmpty)
+            'api_key': apiKey.trim(),
+        },
+      },
+    );
+  }
+
   Future<void> ping() async {
     _send({
       'command': 'ping',
       'request_id': 'ping-${DateTime.now().microsecondsSinceEpoch}',
     });
+  }
+
+  String _nextRequestId(String prefix) =>
+      '$prefix-${DateTime.now().microsecondsSinceEpoch}-${_requestCounter++}';
+
+  Future<Map<String, dynamic>> _request(
+    String command, {
+    Map<String, dynamic> payload = const {},
+  }) {
+    final requestId = _nextRequestId(command);
+    final completer = Completer<Map<String, dynamic>>();
+    _pendingRequests[requestId] = completer;
+    try {
+      _send({'command': command, 'request_id': requestId, ...payload});
+    } catch (error, stackTrace) {
+      _pendingRequests.remove(requestId);
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+    return completer.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        _pendingRequests.remove(requestId);
+        throw TimeoutException('Python worker 配置请求超时');
+      },
+    );
   }
 
   void _send(Map<String, dynamic> message) {
@@ -205,7 +275,23 @@ class VoiceTranslWorkerClient implements WorkerTransport {
       if (decoded is! Map) {
         throw const FormatException('Worker message is not a JSON object');
       }
-      _messages.add(Map<String, dynamic>.from(decoded));
+      final message = Map<String, dynamic>.from(decoded);
+      final requestId = message['request_id']?.toString();
+      final pending = requestId == null
+          ? null
+          : _pendingRequests.remove(requestId);
+      if (pending != null) {
+        final type = message['type']?.toString();
+        if (type == 'rejected' || type == 'error' || type == 'protocol_error') {
+          pending.completeError(
+            StateError(message['message']?.toString() ?? '配置请求失败'),
+          );
+        } else {
+          pending.complete(message);
+        }
+        return;
+      }
+      _messages.add(message);
     } catch (error) {
       _messages.add({
         'type': 'protocol_error',
@@ -221,6 +307,12 @@ class VoiceTranslWorkerClient implements WorkerTransport {
       return;
     }
     _closing = true;
+    for (final pending in _pendingRequests.values) {
+      if (!pending.isCompleted) {
+        pending.completeError(StateError('Python worker 已关闭'));
+      }
+    }
+    _pendingRequests.clear();
     final process = _process;
     if (process != null) {
       try {

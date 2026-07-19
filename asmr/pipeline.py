@@ -234,6 +234,7 @@ def process_one(
             vad_doc,
             config.path_from_root(model_paths["transwithai_whisper_ja"]),
             config.settings["asr"]["device_preset"],
+            config.settings["asr"].get("intensity", "medium"),
             cache_dir / "asr_chunks",
             cache_dir / "asr_partial.jsonl",
             limit_segments=limit_segments,
