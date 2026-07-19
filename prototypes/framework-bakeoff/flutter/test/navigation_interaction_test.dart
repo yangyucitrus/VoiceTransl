@@ -157,10 +157,14 @@ void main() {
     expect(find.text('本地转写强度'), findsOneWidget);
     expect(find.text('中'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('高'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('高'));
     await tester.pumpAndSettle();
     expect(worker.intensity, 'high');
 
+    await tester.ensureVisible(find.text('配置接口'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('配置接口'));
     await tester.pumpAndSettle();
     expect(
