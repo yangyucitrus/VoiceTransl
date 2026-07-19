@@ -65,6 +65,8 @@ class COpenAITokenPool:
         self.timeout = config.getBackendConfigSection(section_name).get(
             "apiTimeout", 60
         )
+        extra_body = config.getBackendConfigSection(section_name).get("extraBody")
+        self.extra_body = extra_body if isinstance(extra_body, dict) else None
 
         if all_tokens := config.getBackendConfigSection(section_name).get("tokens"):
             for tokenEntry in all_tokens:
@@ -148,6 +150,8 @@ class COpenAITokenPool:
                 stream=token.stream,
                 max_tokens=1,
             )
+            if self.extra_body:
+                create_kwargs["extra_body"] = self.extra_body
             try:
                 response = client.chat.completions.create(**create_kwargs)
             except TypeError:

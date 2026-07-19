@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .subtitles import galtransl_to_zh, ja_to_galtransl, read_json, write_json
 from .yaml_compat import safe_dump
@@ -15,42 +16,100 @@ def normalize_endpoint(endpoint: str) -> str:
     return endpoint[:-3] if endpoint.endswith("/v1") else endpoint
 
 
+def build_chat_extra_body(endpoint: str) -> dict[str, Any]:
+    """Return provider-specific request fields needed for reliable translation."""
+    hostname = (urlsplit(normalize_endpoint(endpoint)).hostname or "").lower()
+    if hostname == "api.deepseek.com":
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
 def preflight_api(endpoint: str, model: str, api_key: str) -> tuple[bool, str]:
     try:
         import requests
     except Exception as exc:
         return False, f"requests is not installed: {exc}"
-    url = normalize_endpoint(endpoint) + "/v1/models"
+    base_url = normalize_endpoint(endpoint)
+    url = base_url + "/v1/models"
     try:
         response = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
     except requests.RequestException as exc:
         return False, f"API preflight failed: {exc}"
     if response.status_code in (401, 403):
         return False, f"API authorization failed: HTTP {response.status_code}"
+    warnings: list[str] = []
     if response.status_code >= 400:
-        return True, f"Model list returned HTTP {response.status_code}; continuing with warning."
+        warnings.append(f"model list returned HTTP {response.status_code}")
+    else:
+        try:
+            payload = response.json()
+        except ValueError:
+            warnings.append("model list response was not JSON")
+        else:
+            if isinstance(payload, dict):
+                models = payload.get("data", [])
+            elif isinstance(payload, list):
+                models = payload
+            else:
+                models = []
+            ids = {item.get("id") for item in models if isinstance(item, dict)}
+            if ids and model not in ids:
+                warnings.append(f"configured model '{model}' was not in the model list")
+
+    request_body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply exactly with OK."}],
+        "max_tokens": 32,
+        "stream": False,
+    }
+    request_body.update(build_chat_extra_body(endpoint))
+    try:
+        response = requests.post(
+            base_url + "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return False, f"API generation preflight failed: {exc}"
+    if response.status_code in (401, 403):
+        return False, f"API authorization failed: HTTP {response.status_code}"
+    if response.status_code >= 400:
+        return False, f"API generation preflight failed: HTTP {response.status_code}"
     try:
         payload = response.json()
     except ValueError:
-        return True, "Model list response is not JSON; continuing with warning."
-    models = payload.get("data", payload if isinstance(payload, list) else [])
-    ids = {item.get("id") for item in models if isinstance(item, dict)}
-    if ids and model not in ids:
-        return True, f"Configured model '{model}' was not found in model list; continuing with warning."
-    return True, "API preflight passed."
+        return False, "API generation preflight returned non-JSON content."
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    first_choice = choices[0] if isinstance(choices, list) and choices else None
+    message = first_choice.get("message") if isinstance(first_choice, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        return False, "API generation preflight returned empty text."
+
+    warning_suffix = f" Warning: {'; '.join(warnings)}." if warnings else ""
+    return True, f"API preflight passed.{warning_suffix}"
 
 
 def build_galtransl_config(endpoint: str, model: str, api_key: str, profile: str) -> dict[str, Any]:
+    backend_config: dict[str, Any] = {
+        "tokens": [{"token": api_key, "endpoint": endpoint, "modelName": model}],
+        "tokenStrategy": "fallback",
+        "checkAvailable": False,
+        "stream": True,
+        "apiTimeout": 120,
+        "apiErrorWait": "auto",
+    }
+    extra_body = build_chat_extra_body(endpoint)
+    if extra_body:
+        backend_config["extraBody"] = extra_body
+
     return {
         "backendSpecific": {
-            "OpenAI-Compatible": {
-                "tokens": [{"token": api_key, "endpoint": endpoint, "modelName": model}],
-                "tokenStrategy": "fallback",
-                "checkAvailable": False,
-                "stream": True,
-                "apiTimeout": 120,
-                "apiErrorWait": "auto",
-            }
+            "OpenAI-Compatible": backend_config,
         },
         "plugin": {
             "filePlugin": "file_galtransl_json",

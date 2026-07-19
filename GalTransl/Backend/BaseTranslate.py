@@ -174,17 +174,16 @@ class BaseTranslate:
 
     def init_chatbot(self, eng_type, config: CProjectConfig):
         section_name = "OpenAI-Compatible"
+        backend_config = config.getBackendConfigSection(section_name)
 
-        self.api_timeout = config.getBackendConfigSection(section_name).get(
-            "apiTimeout", 60
+        self.api_timeout = backend_config.get("apiTimeout", 60)
+        self.apiErrorWait = backend_config.get("apiErrorWait", "auto")
+        self.tokenStrategy = backend_config.get("tokenStrategy", "random")
+        self.stream = backend_config.get("stream", True)
+        extra_body = backend_config.get("extraBody")
+        self.extra_body = (
+            extra_body if isinstance(extra_body, dict) and extra_body else NOT_GIVEN
         )
-        self.apiErrorWait = config.getBackendConfigSection(section_name).get(
-            "apiErrorWait", "auto"
-        )
-        self.tokenStrategy = config.getBackendConfigSection(section_name).get(
-            "tokenStrategy", "random"
-        )
-        self.stream = config.getBackendConfigSection(section_name).get("stream", True)
 
         change_prompt = CProjectConfig.getProjectConfig(config)["common"].get(
             "gpt.change_prompt", "no"
@@ -639,6 +638,7 @@ class BaseTranslate:
                         timeout=self.api_timeout,
                         top_p=top_p,
                         reasoning_effort=reasoning_effort,
+                        extra_body=self.extra_body,
                     )
                 )
 
