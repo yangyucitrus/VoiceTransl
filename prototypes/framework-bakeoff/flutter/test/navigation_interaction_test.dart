@@ -172,6 +172,59 @@ void main() {
     expect(find.byKey(const ValueKey('activity-dialog')), findsOneWidget);
   });
 
+  testWidgets('preflight failure leaves processing stages pending', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-ui-preflight-failure-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final worker = UiFakeWorker();
+    final controller = WorkbenchController(worker: worker, projectRoot: root);
+    addTearDown(controller.dispose);
+    await tester.runAsync(controller.initialize);
+    controller.tasks = const [
+      TaskSnapshot(
+        path: 'scene.wav',
+        name: 'scene.wav',
+        status: 'failed',
+        stage: 'preflight failed',
+        stageKey: '',
+        error: 'API generation preflight timed out',
+      ),
+    ];
+    controller.lastError = 'API generation preflight timed out';
+    await tester.pumpWidget(
+      VoiceTranslApp(demoMode: true, controller: controller),
+    );
+    await tester.pumpAndSettle();
+
+    for (final key in const [
+      'activity-audio',
+      'activity-asr',
+      'activity-translation',
+    ]) {
+      final line = find.byKey(ValueKey(key));
+      expect(line, findsOneWidget);
+      expect(
+        find.descendant(
+          of: line,
+          matching: find.byIcon(Icons.check_circle_rounded),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: line,
+          matching: find.byIcon(Icons.radio_button_unchecked_rounded),
+        ),
+        findsOneWidget,
+      );
+    }
+  });
+
   testWidgets('view all opens export history', (tester) async {
     await pumpWorkbench(tester);
 

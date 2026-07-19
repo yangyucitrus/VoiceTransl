@@ -21,6 +21,7 @@ When running the default full pipeline:
 - If a standard model list is returned, verify the configured model when possible.
 - If the provider does not support a standard model-list endpoint, retain the warning but allow the run only when the generation probe succeeds.
 - Apply provider-specific compatibility fields consistently to both the generation probe and GalTransl requests. The official DeepSeek endpoint runs subtitle translation with thinking disabled so reasoning tokens cannot consume the output budget or leave the final content empty.
+- Retry transient connection/read failures, `408`, `425`, `429`, and common `5xx` responses up to three attempts with bounded exponential backoff. Do not retry clear authentication or request errors.
 - Stop with an actionable configuration error if API validation fails.
 
 When running `--transcribe-only`:
@@ -41,6 +42,7 @@ The preflight behavior is controlled by `pipeline.preflight_translation_api: tru
 - Users do not spend time on ASR only to discover a missing or invalid translation token afterward.
 - Transcription-only runs remain useful offline.
 - Full pipeline startup has a model-list request and one very small generation request before local processing begins.
+- A temporarily slow provider can add up to two retry delays before startup, but a single latency spike no longer fails the whole batch.
 - DeepSeek V4 subtitle translation uses non-thinking mode, which is faster and more predictable for structured batch translation.
 - The CLI and future GUI need clear error messages for missing key, authorization failure, endpoint failure, and model validation failure.
 - Advanced CLI users can bypass broken model-list endpoints without changing the default GUI experience.

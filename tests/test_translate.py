@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import requests
+
 from GalTransl.Backend.BaseTranslate import BaseTranslate, RequestHealthMetrics
 from GalTransl.COpenAI import COpenAIToken
 from asmr.translate import build_galtransl_config, preflight_api
@@ -104,6 +106,42 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("empty text", message)
+
+    @patch("time.sleep")
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_preflight_retries_a_transient_generation_timeout(
+        self,
+        get: Mock,
+        post: Mock,
+        sleep: Mock,
+    ) -> None:
+        get.return_value = Mock(
+            status_code=200,
+            json=Mock(return_value={"data": [{"id": "deepseek-v4-flash"}]}),
+        )
+        post.side_effect = [
+            requests.ReadTimeout("temporary latency spike"),
+            Mock(
+                status_code=200,
+                json=Mock(
+                    return_value={
+                        "choices": [{"message": {"content": "OK"}}],
+                    }
+                ),
+            ),
+        ]
+
+        ok, message = preflight_api(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            "secret",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "API preflight passed.")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(1.0)
 
 
 class GalTranslRequestTests(unittest.IsolatedAsyncioTestCase):

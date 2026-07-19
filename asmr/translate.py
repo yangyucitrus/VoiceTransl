@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
 from .subtitles import galtransl_to_zh, ja_to_galtransl, read_json, write_json
 from .yaml_compat import safe_dump
+
+
+PREFLIGHT_ATTEMPTS = 3
+PREFLIGHT_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -24,6 +29,28 @@ def build_chat_extra_body(endpoint: str) -> dict[str, Any]:
     return {}
 
 
+def _request_with_retry(requests_module: Any, request: Any, url: str, **kwargs: Any) -> Any:
+    last_error: Exception | None = None
+    last_response: Any = None
+    for attempt in range(PREFLIGHT_ATTEMPTS):
+        try:
+            response = request(url, **kwargs)
+        except requests_module.RequestException as exc:
+            last_error = exc
+        else:
+            last_response = response
+            if response.status_code not in PREFLIGHT_RETRY_STATUSES:
+                return response
+            last_error = None
+        if attempt < PREFLIGHT_ATTEMPTS - 1:
+            time.sleep(float(2**attempt))
+    if last_response is not None:
+        return last_response
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("API preflight request failed without a response")
+
+
 def preflight_api(endpoint: str, model: str, api_key: str) -> tuple[bool, str]:
     try:
         import requests
@@ -31,30 +58,41 @@ def preflight_api(endpoint: str, model: str, api_key: str) -> tuple[bool, str]:
         return False, f"requests is not installed: {exc}"
     base_url = normalize_endpoint(endpoint)
     url = base_url + "/v1/models"
-    try:
-        response = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
-    except requests.RequestException as exc:
-        return False, f"API preflight failed: {exc}"
-    if response.status_code in (401, 403):
-        return False, f"API authorization failed: HTTP {response.status_code}"
     warnings: list[str] = []
-    if response.status_code >= 400:
-        warnings.append(f"model list returned HTTP {response.status_code}")
+    try:
+        response = _request_with_retry(
+            requests,
+            requests.get,
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=(5, 20),
+        )
+    except requests.RequestException as exc:
+        warnings.append(
+            f"model list check failed after {PREFLIGHT_ATTEMPTS} attempts: {exc}"
+        )
     else:
-        try:
-            payload = response.json()
-        except ValueError:
-            warnings.append("model list response was not JSON")
+        if response.status_code in (401, 403):
+            return False, f"API authorization failed: HTTP {response.status_code}"
+        if response.status_code >= 400:
+            warnings.append(f"model list returned HTTP {response.status_code}")
         else:
-            if isinstance(payload, dict):
-                models = payload.get("data", [])
-            elif isinstance(payload, list):
-                models = payload
+            try:
+                payload = response.json()
+            except ValueError:
+                warnings.append("model list response was not JSON")
             else:
-                models = []
-            ids = {item.get("id") for item in models if isinstance(item, dict)}
-            if ids and model not in ids:
-                warnings.append(f"configured model '{model}' was not in the model list")
+                if isinstance(payload, dict):
+                    models = payload.get("data", [])
+                elif isinstance(payload, list):
+                    models = payload
+                else:
+                    models = []
+                ids = {item.get("id") for item in models if isinstance(item, dict)}
+                if ids and model not in ids:
+                    warnings.append(
+                        f"configured model '{model}' was not in the model list"
+                    )
 
     request_body: dict[str, Any] = {
         "model": model,
@@ -64,17 +102,22 @@ def preflight_api(endpoint: str, model: str, api_key: str) -> tuple[bool, str]:
     }
     request_body.update(build_chat_extra_body(endpoint))
     try:
-        response = requests.post(
+        response = _request_with_retry(
+            requests,
+            requests.post,
             base_url + "/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json=request_body,
-            timeout=20,
+            timeout=(10, 30),
         )
     except requests.RequestException as exc:
-        return False, f"API generation preflight failed: {exc}"
+        return False, (
+            "API generation preflight failed after "
+            f"{PREFLIGHT_ATTEMPTS} attempts: {exc}"
+        )
     if response.status_code in (401, 403):
         return False, f"API authorization failed: HTTP {response.status_code}"
     if response.status_code >= 400:

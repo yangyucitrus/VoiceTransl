@@ -3362,11 +3362,25 @@ class _AssistantPanel extends StatelessWidget {
       if (task == null) {
         return _ActivityState.pending;
       }
-      if (task.isFinished || currentStage > stage) {
+      if (task.status == 'translation_failed') {
+        if (stage < 4) {
+          return _ActivityState.complete;
+        }
+        return stage == 4 ? _ActivityState.failed : _ActivityState.pending;
+      }
+      if (task.status == 'success' || task.status == 'transcribe_only') {
         return _ActivityState.complete;
       }
-      if (currentStage == stage && task.status == 'running') {
-        return _ActivityState.active;
+      if (currentStage > stage) {
+        return _ActivityState.complete;
+      }
+      if (currentStage == stage) {
+        if (task.status == 'running') {
+          return _ActivityState.active;
+        }
+        if (task.status == 'failed') {
+          return _ActivityState.failed;
+        }
       }
       return _ActivityState.pending;
     }
@@ -3515,6 +3529,7 @@ class _AssistantPanel extends StatelessWidget {
                     label: '音频预处理',
                     time: stateFor(1) == _ActivityState.complete ? '完成' : '等待中',
                     state: stateFor(1),
+                    key: const ValueKey('activity-audio'),
                   ),
                   const SizedBox(height: 8),
                   _ActivityLine(
@@ -3525,6 +3540,7 @@ class _AssistantPanel extends StatelessWidget {
                         ? '完成'
                         : '等待中',
                     state: stateFor(3),
+                    key: const ValueKey('activity-asr'),
                   ),
                   const SizedBox(height: 8),
                   _ActivityLine(
@@ -3539,6 +3555,7 @@ class _AssistantPanel extends StatelessWidget {
                     state: !controller.translationEnabled
                         ? _ActivityState.pending
                         : stateFor(4),
+                    key: const ValueKey('activity-translation'),
                   ),
                   const SizedBox(height: 8),
                   _ActivityLine(
@@ -3667,10 +3684,11 @@ class _SettingRow extends StatelessWidget {
   }
 }
 
-enum _ActivityState { complete, active, pending }
+enum _ActivityState { complete, active, failed, pending }
 
 class _ActivityLine extends StatelessWidget {
   const _ActivityLine({
+    super.key,
     required this.label,
     required this.time,
     required this.state,
@@ -3682,14 +3700,17 @@ class _ActivityLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final effectiveTime = state == _ActivityState.failed ? '失败' : time;
     final color = switch (state) {
       _ActivityState.complete => VtColors.green,
       _ActivityState.active => VtColors.pink,
+      _ActivityState.failed => VtColors.pinkPressed,
       _ActivityState.pending => VtColors.inkFaint,
     };
     final icon = switch (state) {
       _ActivityState.complete => Icons.check_circle_rounded,
       _ActivityState.active => Icons.radio_button_checked_rounded,
+      _ActivityState.failed => Icons.error_rounded,
       _ActivityState.pending => Icons.radio_button_unchecked_rounded,
     };
 
@@ -3711,7 +3732,7 @@ class _ActivityLine extends StatelessWidget {
           ),
         ),
         Text(
-          time,
+          effectiveTime,
           style: const TextStyle(
             color: VtColors.inkFaint,
             fontSize: 10,
