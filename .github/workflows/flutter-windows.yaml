@@ -46,11 +46,8 @@ jobs:
       - name: Analyze Flutter source
         run: flutter analyze
 
-      - name: Run portable interaction tests
-        run: >-
-          flutter test
-          test/workbench_controller_test.dart
-          test/navigation_interaction_test.dart
+      - name: Run Flutter tests
+        run: flutter test
 
       - name: Build Windows release
         run: flutter build windows --release
