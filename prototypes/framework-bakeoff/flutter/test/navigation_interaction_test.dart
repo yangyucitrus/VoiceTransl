@@ -149,7 +149,7 @@ void main() {
       projectRoot: root,
     );
     addTearDown(controller.dispose);
-    await controller.initialize();
+    await tester.runAsync(controller.initialize);
     await tester.pumpWidget(
       VoiceTranslApp(demoMode: true, controller: controller),
     );
