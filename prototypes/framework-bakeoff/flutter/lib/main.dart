@@ -193,10 +193,10 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       const ['工作台', '素材库', '词汇表', '导出记录', '设置'][selectedNav];
 
   String get _pageSubtitle => switch (selectedNav) {
-    0 => '本次已完成 ${controller.completedTasks.length} 个音频',
+    0 => '已有 ${controller.completedTasks.length} 个可用输出',
     1 => '已载入 ${controller.tasks.length} 个本地音视频文件',
     2 => '维护转写纠错、翻译术语和译后替换',
-    3 => '本次会话共有 ${controller.completedTasks.length} 个可用输出',
+    3 => '已持久化 ${controller.completedTasks.length} 条处理记录',
     _ => controller.workerReady ? 'Python 后端已连接' : 'Python 后端当前离线',
   };
 
@@ -729,7 +729,9 @@ class _QueuePane extends StatelessWidget {
             FilledButton.icon(
               onPressed: controller.canStart ? controller.startTasks : null,
               icon: const Icon(Icons.play_arrow_rounded, size: 19),
-              label: const Text('开始转写'),
+              label: Text(
+                controller.translationEnabled ? '转写并翻译' : '开始转写',
+              ),
             ),
           ],
         ),
@@ -785,7 +787,7 @@ class _TranscriptPage extends StatelessWidget {
             child: Row(
               children: [
                 const Text(
-                  '日语转写稿',
+                  '字幕预览',
                   style: TextStyle(
                     color: VtColors.ink,
                     fontSize: 14,
@@ -796,7 +798,7 @@ class _TranscriptPage extends StatelessWidget {
                 Expanded(
                   child: Text(
                     controller.transcriptSource.isEmpty
-                        ? '选择一个已完成任务读取 SRT'
+                        ? '选择一个历史任务读取 SRT'
                         : controller.transcriptSource,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -807,7 +809,7 @@ class _TranscriptPage extends StatelessWidget {
                   ),
                 ),
                 IconButton(
-                  tooltip: '重新加载转写稿',
+                  tooltip: '重新加载字幕',
                   onPressed: completed.isEmpty
                       ? null
                       : () => unawaited(controller.loadTranscript()),
@@ -843,8 +845,8 @@ class _TranscriptPage extends StatelessWidget {
             child: controller.transcriptPreview.isEmpty
                 ? const _PageEmptyState(
                     icon: Icons.subtitles_outlined,
-                    title: '还没有可预览的转写稿',
-                    message: '完成一次转写后，可在这里读取并复制日语 SRT 内容',
+                    title: '还没有可预览的字幕',
+                    message: '完成任务后，可在这里读取日语或双语 SRT 内容',
                   )
                 : SingleChildScrollView(
                     padding: const EdgeInsets.all(20),
@@ -1129,9 +1131,15 @@ class _DictionaryPage extends StatelessWidget {
                   ),
                 ),
                 OutlinedButton.icon(
-                  onPressed: () => controller.openWorkspaceFile(entry.$3),
+                  onPressed: () => _showWorkspaceTextEditor(
+                    context,
+                    controller: controller,
+                    title: entry.$1,
+                    description: entry.$2,
+                    relativePath: entry.$3,
+                  ),
                   icon: const Icon(Icons.edit_outlined, size: 17),
-                  label: const Text('编辑'),
+                  label: const Text('应用内编辑'),
                 ),
               ],
             ),
@@ -1165,7 +1173,7 @@ class _ExportHistoryPage extends StatelessWidget {
             child: Row(
               children: [
                 Text(
-                  '本次会话输出 · ${tasks.length}',
+                  '历史输出 · ${tasks.length}',
                   style: const TextStyle(
                     color: VtColors.ink,
                     fontSize: 14,
@@ -1189,7 +1197,7 @@ class _ExportHistoryPage extends StatelessWidget {
                 ? const _PageEmptyState(
                     icon: Icons.outbox_outlined,
                     title: '还没有导出记录',
-                    message: '完成的日语 SRT 和缓存结果会在这里集中显示',
+                    message: '完成的日语与双语 SRT 会跨启动保留在这里',
                   )
                 : ListView.separated(
                     itemCount: tasks.length,
@@ -1216,9 +1224,9 @@ class _SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return ListView(
       key: const ValueKey('settings-page'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      padding: EdgeInsets.zero,
       children: [
         Container(
           padding: const EdgeInsets.all(18),
@@ -1271,12 +1279,20 @@ class _SettingsPage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 16),
+        _RuntimeModePanel(controller: controller),
+        const SizedBox(height: 10),
         _SettingsActionRow(
           icon: Icons.tune_rounded,
           title: '流水线设置',
           subtitle: 'ASR、VAD、缓存、字幕格式与翻译接口',
-          actionLabel: '编辑 settings.yaml',
-          onPressed: () => controller.openWorkspaceFile('settings.yaml'),
+          actionLabel: '应用内编辑',
+          onPressed: () => _showWorkspaceTextEditor(
+            context,
+            controller: controller,
+            title: '流水线设置',
+            description: '直接编辑 settings.yaml，保存后对下一批任务生效',
+            relativePath: 'settings.yaml',
+          ),
         ),
         const SizedBox(height: 10),
         _SettingsActionRow(
@@ -1293,6 +1309,349 @@ class _SettingsPage extends StatelessWidget {
           subtitle: controller.projectRootPath,
           actionLabel: '在资源管理器中打开',
           onPressed: controller.openProjectDirectory,
+        ),
+      ],
+    );
+  }
+}
+
+class _RuntimeModePanel extends StatelessWidget {
+  const _RuntimeModePanel({required this.controller});
+
+  final WorkbenchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 15, 14, 13),
+      decoration: BoxDecoration(
+        color: VtColors.surface,
+        border: Border.all(color: VtColors.border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '运行模式',
+                      style: TextStyle(
+                        color: VtColors.ink,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      '控制下一批任务是否调用翻译接口并生成双语字幕',
+                      style: TextStyle(color: VtColors.inkMuted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.hearing_rounded, size: 17),
+                    label: Text('仅转写'),
+                  ),
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.translate_rounded, size: 17),
+                    label: Text('转写 + 翻译'),
+                  ),
+                ],
+                selected: {controller.translationEnabled},
+                showSelectedIcon: false,
+                onSelectionChanged: controller.running
+                    ? null
+                    : (selection) => unawaited(
+                        controller.setTranslationEnabled(selection.first),
+                      ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 11),
+          const Divider(),
+          _CompactSwitchRow(
+            title: '复用缓存',
+            subtitle: '已有中间结果可直接复用，适合日常重复处理',
+            value: controller.reuseCache,
+            enabled: !controller.running,
+            onChanged: (value) => unawaited(controller.setReuseCache(value)),
+          ),
+          _CompactSwitchRow(
+            title: '翻译接口预检',
+            subtitle: '任务开始前检查接口配置，避免转写后才发现不可用',
+            value: controller.apiPreflight,
+            enabled: controller.translationEnabled && !controller.running,
+            onChanged: (value) => unawaited(controller.setApiPreflight(value)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompactSwitchRow extends StatelessWidget {
+  const _CompactSwitchRow({
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool value;
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 52,
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: enabled ? VtColors.ink : VtColors.inkFaint,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: VtColors.inkMuted,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch(value: value, onChanged: enabled ? onChanged : null),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _showWorkspaceTextEditor(
+  BuildContext context, {
+  required WorkbenchController controller,
+  required String title,
+  required String description,
+  required String relativePath,
+}) {
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => _WorkspaceTextEditorDialog(
+      controller: controller,
+      title: title,
+      description: description,
+      relativePath: relativePath,
+    ),
+  );
+}
+
+class _WorkspaceTextEditorDialog extends StatefulWidget {
+  const _WorkspaceTextEditorDialog({
+    required this.controller,
+    required this.title,
+    required this.description,
+    required this.relativePath,
+  });
+
+  final WorkbenchController controller;
+  final String title;
+  final String description;
+  final String relativePath;
+
+  @override
+  State<_WorkspaceTextEditorDialog> createState() =>
+      _WorkspaceTextEditorDialogState();
+}
+
+class _WorkspaceTextEditorDialogState
+    extends State<_WorkspaceTextEditorDialog> {
+  final TextEditingController textController = TextEditingController();
+  bool loading = true;
+  bool saving = false;
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      textController.text = await widget.controller.readWorkspaceText(
+        widget.relativePath,
+      );
+    } catch (exception) {
+      error = exception.toString();
+    }
+    if (mounted) {
+      setState(() => loading = false);
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      saving = true;
+      error = '';
+    });
+    try {
+      await widget.controller.saveWorkspaceText(
+        widget.relativePath,
+        textController.text,
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (exception) {
+      if (mounted) {
+        setState(() {
+          saving = false;
+          error = exception.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    textController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const ValueKey('workspace-editor-dialog'),
+      titlePadding: const EdgeInsets.fromLTRB(24, 20, 20, 10),
+      contentPadding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+      title: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: VtColors.pinkSoft,
+              borderRadius: BorderRadius.circular(7),
+            ),
+            child: const Icon(
+              Icons.edit_note_rounded,
+              size: 20,
+              color: VtColors.pinkPressed,
+            ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(child: Text(widget.title)),
+          IconButton(
+            tooltip: '关闭',
+            onPressed: saving ? null : () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close_rounded, size: 19),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 760,
+        height: 470,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              widget.description,
+              style: const TextStyle(color: VtColors.inkMuted, fontSize: 11),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              widget.relativePath,
+              style: const TextStyle(color: VtColors.inkFaint, fontSize: 10),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : TextField(
+                      key: const ValueKey('workspace-editor-field'),
+                      controller: textController,
+                      expands: true,
+                      maxLines: null,
+                      minLines: null,
+                      keyboardType: TextInputType.multiline,
+                      textAlignVertical: TextAlignVertical.top,
+                      style: const TextStyle(
+                        color: VtColors.ink,
+                        fontSize: 12,
+                        height: 1.55,
+                        fontFamily: 'Consolas',
+                      ),
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: VtColors.background,
+                        contentPadding: const EdgeInsets.all(14),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: VtColors.border),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(7),
+                          borderSide: const BorderSide(color: VtColors.border),
+                        ),
+                      ),
+                    ),
+            ),
+            if (error.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                error,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: VtColors.pinkPressed, fontSize: 11),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: loading || saving ? null : _save,
+          icon: saving
+              ? const SizedBox.square(
+                  dimension: 15,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.save_outlined, size: 17),
+          label: Text(saving ? '保存中' : '保存'),
         ),
       ],
     );
@@ -1451,7 +1810,7 @@ class _SegmentedTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const labels = ['任务队列', '转写稿'];
+    const labels = ['任务队列', '字幕预览'];
     return Container(
       height: 40,
       padding: const EdgeInsets.all(3),
@@ -1928,7 +2287,7 @@ class _OutputRow extends StatelessWidget {
         Expanded(
           flex: 2,
           child: Text(
-            task.completedAt.isEmpty ? '刚刚' : task.completedAt,
+            task.completedLabel,
             style: const TextStyle(
               color: VtColors.inkMuted,
               fontSize: 11,
@@ -2003,7 +2362,7 @@ class _AssistantPanel extends StatelessWidget {
               child: Row(
                 children: [
                   const Text(
-                    '小樱助手',
+                    '声纹助手',
                     style: TextStyle(
                       color: VtColors.ink,
                       fontSize: 14,
@@ -2032,59 +2391,56 @@ class _AssistantPanel extends StatelessWidget {
           ),
           const Divider(),
           Container(
-            height: 190,
+            height: 158,
             color: VtColors.surfaceSoft,
-            child: Stack(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 13),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Positioned(
-                  left: 16,
-                  top: 15,
+                Text(
+                  controller.lastError.isNotEmpty
+                      ? '有一项需要处理'
+                      : task == null
+                      ? '选一个音频开始吧'
+                      : controller.running
+                      ? controller.translationEnabled
+                            ? '正在生成双语字幕'
+                            : '正在本地转写'
+                      : '任务已经准备好',
+                  style: const TextStyle(
+                    color: VtColors.pinkPressed,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0,
+                  ),
+                ),
+                const Spacer(),
+                const Align(
+                  alignment: Alignment.center,
+                  child: _VoiceMark(),
+                ),
+                const Spacer(),
+                const Align(
+                  alignment: Alignment.center,
                   child: Text(
-                    controller.lastError.isNotEmpty
-                        ? '有一项需要处理'
-                        : task == null
-                        ? '选一个音频开始吧'
-                        : controller.running
-                        ? '正在本地转写'
-                        : '任务已经准备好',
-                    style: const TextStyle(
-                      color: VtColors.pinkPressed,
-                      fontSize: 12,
+                    'MIMI · LOCAL VOICE LAB',
+                    style: TextStyle(
+                      color: VtColors.inkMuted,
+                      fontSize: 9,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 0,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 8,
-                  top: 6,
-                  child: Icon(
-                    Icons.graphic_eq_rounded,
-                    size: 60,
-                    color: VtColors.pink.withValues(alpha: 0.08),
-                  ),
-                ),
-                Positioned.fill(
-                  top: 10,
-                  child: Semantics(
-                    image: true,
-                    label: '戴粉色耳机的 Q 版语音助手',
-                    child: Image.asset(
-                      'assets/assistant.png',
-                      alignment: Alignment.bottomCenter,
-                      fit: BoxFit.contain,
                     ),
                   ),
                 ),
               ],
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 14, 16, 12),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                const Text(
                   '本次配置',
                   style: TextStyle(
                     color: VtColors.ink,
@@ -2093,10 +2449,16 @@ class _AssistantPanel extends StatelessWidget {
                     letterSpacing: 0,
                   ),
                 ),
-                SizedBox(height: 9),
-                _SettingRow(label: '识别模型', value: 'Whisper JA 1.5B'),
-                _SettingRow(label: '源语言', value: '日语'),
-                _SettingRow(label: '输出格式', value: '日语 SRT'),
+                const SizedBox(height: 9),
+                const _SettingRow(label: '识别模型', value: 'Whisper JA 1.5B'),
+                _SettingRow(
+                  label: '运行模式',
+                  value: controller.translationEnabled ? '转写 + 翻译' : '仅转写',
+                ),
+                _SettingRow(
+                  label: '输出格式',
+                  value: controller.translationEnabled ? '双语 SRT' : '日语 SRT',
+                ),
               ],
             ),
           ),
@@ -2134,6 +2496,20 @@ class _AssistantPanel extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   _ActivityLine(
+                    label: '翻译中文字幕',
+                    time: !controller.translationEnabled
+                        ? '已关闭'
+                        : stateFor(4) == _ActivityState.active
+                        ? '进行中'
+                        : stateFor(4) == _ActivityState.complete
+                        ? '完成'
+                        : '等待中',
+                    state: !controller.translationEnabled
+                        ? _ActivityState.pending
+                        : stateFor(4),
+                  ),
+                  const SizedBox(height: 8),
+                  _ActivityLine(
                     label: '写入字幕文件',
                     time: task?.hasOutput == true ? '完成' : '等待中',
                     state: task?.hasOutput == true
@@ -2155,6 +2531,64 @@ class _AssistantPanel extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _VoiceMark extends StatelessWidget {
+  const _VoiceMark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '粉色声纹助手标识',
+      child: Container(
+        key: const ValueKey('voice-mark'),
+        width: 76,
+        height: 68,
+        decoration: BoxDecoration(
+          color: VtColors.surface,
+          border: Border.all(color: const Color(0xFFF4B6CC), width: 1.5),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x1AE9578A),
+              blurRadius: 14,
+              offset: Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            const Center(
+              child: Icon(
+                Icons.graphic_eq_rounded,
+                size: 42,
+                color: VtColors.pink,
+              ),
+            ),
+            Positioned(
+              right: -7,
+              top: -7,
+              child: Container(
+                width: 25,
+                height: 25,
+                decoration: BoxDecoration(
+                  color: VtColors.cyanSoft,
+                  border: Border.all(color: VtColors.surface, width: 2),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: const Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 13,
+                  color: VtColors.cyan,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

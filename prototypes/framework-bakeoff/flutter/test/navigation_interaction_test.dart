@@ -37,7 +37,7 @@ void main() {
   testWidgets('transcript tab replaces the queue content', (tester) async {
     await pumpWorkbench(tester);
 
-    await tester.tap(find.text('转写稿'));
+    await tester.tap(find.text('字幕预览'));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('transcript-page')), findsOneWidget);

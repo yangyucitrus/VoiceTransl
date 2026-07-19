@@ -106,7 +106,9 @@ void main() {
 
     expect(controller.workerReady, isTrue);
     expect(worker.lastInputs, [r'C:\audio\scene.wav']);
-    expect(worker.lastOptions['transcribe_only'], isTrue);
+    expect(worker.lastOptions['transcribe_only'], isFalse);
+    expect(worker.lastOptions['reuse_cache'], isTrue);
+    expect(worker.lastOptions['skip_api_preflight'], isFalse);
 
     worker.emit({
       'type': 'event',
@@ -142,6 +144,7 @@ void main() {
     expect(controller.running, isFalse);
     expect(controller.tasks.single.status, 'transcribe_only');
     expect(controller.tasks.single.outputDir, r'C:\audio\scene.voicetransl');
+    expect(controller.canStart, isFalse);
   });
 
   test('forwards cancellation for the active request', () async {
@@ -216,5 +219,99 @@ void main() {
     expect(launcher.openedFile, settings.path);
     expect(launcher.openedDirectory, root.path);
     expect(models.existsSync(), isTrue);
+  });
+
+  test('persists run preferences and forwards transcribe-only mode', () async {
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-preferences-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final firstWorker = FakeWorker();
+    final first = WorkbenchController(
+      worker: firstWorker,
+      mediaPicker: FakePicker([r'C:\audio\scene.wav']),
+      projectRoot: root,
+    );
+    addTearDown(first.dispose);
+
+    await first.setTranslationEnabled(false);
+    await first.setReuseCache(false);
+    await first.setApiPreflight(false);
+    await first.initialize();
+    await first.pickFiles();
+    await first.startTasks();
+
+    expect(firstWorker.lastOptions['transcribe_only'], isTrue);
+    expect(firstWorker.lastOptions['reuse_cache'], isFalse);
+    expect(firstWorker.lastOptions['skip_api_preflight'], isTrue);
+
+    final second = WorkbenchController(
+      worker: FakeWorker(),
+      mediaPicker: FakePicker(const []),
+      projectRoot: root,
+    );
+    addTearDown(second.dispose);
+    await second.initialize();
+
+    expect(second.translationEnabled, isFalse);
+    expect(second.reuseCache, isFalse);
+    expect(second.apiPreflight, isFalse);
+  });
+
+  test('edits allowlisted workspace text without an external editor', () async {
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-text-editor-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final settings = File('${root.path}${Platform.pathSeparator}settings.yaml')
+      ..writeAsStringSync('pipeline:\n  transcribe_only: false\n');
+    final controller = WorkbenchController(
+      worker: FakeWorker(),
+      mediaPicker: FakePicker(const []),
+      projectRoot: root,
+    );
+    addTearDown(controller.dispose);
+
+    expect(await controller.readWorkspaceText('settings.yaml'), contains('pipeline'));
+    await controller.saveWorkspaceText('settings.yaml', 'pipeline: {}\n');
+
+    expect(settings.readAsStringSync(), 'pipeline: {}\n');
+    expect(controller.readWorkspaceText('../.env'), throwsArgumentError);
+  });
+
+  test('discovers output history and restores a bilingual transcript', () async {
+    final separator = Platform.pathSeparator;
+    final root = Directory.systemTemp.createTempSync(
+      'voicetransl-history-test-',
+    );
+    addTearDown(() => root.deleteSync(recursive: true));
+    final files = Directory([root.path, 'files'].join(separator))..createSync();
+    File([files.path, 'scene.wav'].join(separator)).writeAsStringSync('audio');
+    final output = Directory(
+      [files.path, 'scene.voicetransl'].join(separator),
+    )..createSync();
+    File(
+      [output.path, 'scene.combine.srt'].join(separator),
+    ).writeAsStringSync('1\n00:00:00,000 --> 00:00:01,000\nこんにちは\n你好\n');
+
+    final controller = WorkbenchController(
+      worker: FakeWorker(),
+      mediaPicker: FakePicker(const []),
+      projectRoot: root,
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.loadTranscript();
+
+    expect(controller.completedTasks, hasLength(1));
+    expect(controller.completedTasks.single.format, '双语 SRT');
+    expect(controller.transcriptSource, endsWith('scene.combine.srt'));
+    expect(controller.transcriptPreview, contains('你好'));
+    expect(
+      File(
+        [root.path, '.cache', 'flutter_history.json'].join(separator),
+      ).existsSync(),
+      isTrue,
+    );
   });
 }

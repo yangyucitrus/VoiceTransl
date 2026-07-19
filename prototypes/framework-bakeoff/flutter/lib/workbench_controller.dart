@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -17,6 +18,13 @@ const _mediaExtensions = {
   'mp4',
   'ogg',
   'wav',
+};
+
+const _editableWorkspaceFiles = {
+  'settings.yaml',
+  'dictionaries/transcription_corrections.txt',
+  'dictionaries/translation_glossary.txt',
+  'dictionaries/post_translation_replacements.txt',
 };
 
 abstract interface class MediaPicker {
@@ -114,6 +122,24 @@ class TaskSnapshot {
         'translation_failed',
       }.contains(status);
 
+  String get completedLabel {
+    final timestamp = DateTime.tryParse(completedAt)?.toLocal();
+    if (timestamp == null) {
+      return completedAt.isEmpty ? '刚刚' : completedAt;
+    }
+    final now = DateTime.now();
+    final day = DateTime(timestamp.year, timestamp.month, timestamp.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final time = '${_twoDigits(timestamp.hour)}:${_twoDigits(timestamp.minute)}';
+    if (day == today) {
+      return '今天 $time';
+    }
+    if (day == today.subtract(const Duration(days: 1))) {
+      return '昨天 $time';
+    }
+    return '${timestamp.year}-${_twoDigits(timestamp.month)}-${_twoDigits(timestamp.day)} $time';
+  }
+
   String get statusLabel => switch (status) {
     'running' => '转写中',
     'success' => '已完成',
@@ -147,6 +173,36 @@ class TaskSnapshot {
       warnings: warnings ?? this.warnings,
       completedAt: completedAt ?? this.completedAt,
       format: format ?? this.format,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'path': path,
+    'name': name,
+    'status': status,
+    'stage': stage,
+    'stage_key': stageKey,
+    'progress': progress,
+    'output_dir': outputDir,
+    'error': error,
+    'warnings': warnings,
+    'completed_at': completedAt,
+    'format': format,
+  };
+
+  factory TaskSnapshot.fromJson(Map<String, dynamic> json) {
+    return TaskSnapshot(
+      path: json['path']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'transcribe_only',
+      stage: json['stage']?.toString() ?? '处理完成',
+      stageKey: json['stage_key']?.toString() ?? '',
+      progress: (json['progress'] as num?)?.toDouble() ?? 1,
+      outputDir: json['output_dir']?.toString() ?? '',
+      error: json['error']?.toString() ?? '',
+      warnings: (json['warnings'] as num?)?.toInt() ?? 0,
+      completedAt: json['completed_at']?.toString() ?? '',
+      format: json['format']?.toString() ?? 'SRT',
     );
   }
 }
@@ -215,9 +271,14 @@ class WorkbenchController extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _workerSubscription;
   String? _activeRequestId;
   List<int> _requestTaskIndices = const [];
+  List<TaskSnapshot> _history = const [];
+  bool _workspaceStateLoaded = false;
 
   bool workerReady = false;
   bool running = false;
+  bool translationEnabled = true;
+  bool reuseCache = true;
+  bool apiPreflight = true;
   String statusText = '正在连接 Python 后端';
   String lastError = '';
   String transcriptPreview = '';
@@ -225,7 +286,8 @@ class WorkbenchController extends ChangeNotifier {
   List<TaskSnapshot> tasks = const [];
   final List<String> logs = [];
 
-  bool get canStart => workerReady && tasks.isNotEmpty && !running;
+  bool get canStart =>
+      workerReady && tasks.any((task) => !task.isFinished) && !running;
 
   TaskSnapshot? get activeTask {
     for (final task in tasks) {
@@ -241,8 +303,21 @@ class WorkbenchController extends ChangeNotifier {
     return tasks.isEmpty ? null : tasks.first;
   }
 
-  List<TaskSnapshot> get completedTasks =>
-      tasks.where((task) => task.hasOutput).toList(growable: false);
+  List<TaskSnapshot> get completedTasks {
+    final completed = <TaskSnapshot>[];
+    final seen = <String>{};
+    for (final task in [
+      ..._history,
+      ...tasks.where((task) => task.hasOutput),
+    ]) {
+      final key = (task.outputDir.isEmpty ? task.path : task.outputDir)
+          .toLowerCase();
+      if (seen.add(key)) {
+        completed.add(task);
+      }
+    }
+    return completed;
+  }
 
   String get projectRootPath => _projectRoot.path;
 
@@ -255,6 +330,11 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
+    if (!_workspaceStateLoaded) {
+      await Future.wait([_loadPreferences(), _loadHistory()]);
+      _workspaceStateLoaded = true;
+      notifyListeners();
+    }
     final worker = _worker;
     if (worker == null) {
       return;
@@ -295,6 +375,36 @@ class WorkbenchController extends ChangeNotifier {
     transcriptPreview = '';
     transcriptSource = '';
     statusText = '任务列表已清空';
+    notifyListeners();
+  }
+
+  Future<void> setTranslationEnabled(bool value) async {
+    if (translationEnabled == value || running) {
+      return;
+    }
+    translationEnabled = value;
+    statusText = value ? '已启用转写与翻译' : '已切换为仅转写';
+    await _savePreferences();
+    notifyListeners();
+  }
+
+  Future<void> setReuseCache(bool value) async {
+    if (reuseCache == value || running) {
+      return;
+    }
+    reuseCache = value;
+    statusText = value ? '将优先复用已有缓存' : '下次任务将重新处理';
+    await _savePreferences();
+    notifyListeners();
+  }
+
+  Future<void> setApiPreflight(bool value) async {
+    if (apiPreflight == value || running) {
+      return;
+    }
+    apiPreflight = value;
+    statusText = value ? '翻译前将检查接口连接' : '已跳过翻译接口预检';
+    await _savePreferences();
     notifyListeners();
   }
 
@@ -354,7 +464,7 @@ class WorkbenchController extends ChangeNotifier {
       return;
     }
     running = true;
-    statusText = '正在提交转写任务';
+    statusText = translationEnabled ? '正在提交转写与翻译任务' : '正在提交转写任务';
     lastError = '';
     tasks = [
       for (final task in tasks)
@@ -377,10 +487,10 @@ class WorkbenchController extends ChangeNotifier {
     try {
       _activeRequestId = await worker.run(
         inputs: [for (final index in _requestTaskIndices) tasks[index].path],
-        options: const {
-          'transcribe_only': true,
-          'reuse_cache': true,
-          'skip_api_preflight': true,
+        options: {
+          'transcribe_only': !translationEnabled,
+          'reuse_cache': reuseCache,
+          'skip_api_preflight': !apiPreflight,
         },
       );
     } catch (error) {
@@ -440,9 +550,36 @@ class WorkbenchController extends ChangeNotifier {
     await _workspaceLauncher.openFile(file.path);
   }
 
+  Future<String> readWorkspaceText(String relativePath) async {
+    final normalized = relativePath.replaceAll('\\', '/');
+    if (!_editableWorkspaceFiles.contains(normalized)) {
+      throw ArgumentError.value(relativePath, 'relativePath', '不允许编辑该文件');
+    }
+    final file = File(_joinPath(_projectRoot.path, normalized));
+    if (!await file.exists()) {
+      throw FileSystemException('文件不存在', file.path);
+    }
+    return file.readAsString();
+  }
+
+  Future<void> saveWorkspaceText(String relativePath, String content) async {
+    final normalized = relativePath.replaceAll('\\', '/');
+    if (!_editableWorkspaceFiles.contains(normalized)) {
+      throw ArgumentError.value(relativePath, 'relativePath', '不允许编辑该文件');
+    }
+    final file = File(_joinPath(_projectRoot.path, normalized));
+    if (!await file.exists()) {
+      throw FileSystemException('文件不存在', file.path);
+    }
+    await file.writeAsString(content, flush: true);
+    lastError = '';
+    statusText = '已保存 ${_basename(normalized)}';
+    notifyListeners();
+  }
+
   Future<void> loadTranscript([TaskSnapshot? task]) async {
     final completed = completedTasks;
-    final target = task ?? (completed.isEmpty ? null : completed.last);
+    final target = task ?? (completed.isEmpty ? null : completed.first);
     if (target == null || target.outputDir.isEmpty) {
       transcriptPreview = '';
       transcriptSource = '';
@@ -451,19 +588,31 @@ class WorkbenchController extends ChangeNotifier {
     }
     final dot = target.name.lastIndexOf('.');
     final stem = dot > 0 ? target.name.substring(0, dot) : target.name;
-    final transcript = File(_joinPath(target.outputDir, '$stem.ja.srt'));
-    if (!transcript.existsSync()) {
+    final candidates = translationEnabled
+        ? ['$stem.combine.srt', '$stem.zh.srt', '$stem.ja.srt']
+        : ['$stem.ja.srt', '$stem.combine.srt', '$stem.zh.srt'];
+    File? transcript;
+    for (final name in candidates) {
+      final candidate = File(_joinPath(target.outputDir, name));
+      if (candidate.existsSync()) {
+        transcript = candidate;
+        break;
+      }
+    }
+    final transcriptFile =
+        transcript ?? File(_joinPath(target.outputDir, candidates.first));
+    if (!transcriptFile.existsSync()) {
       transcriptPreview = '';
-      transcriptSource = transcript.path;
-      lastError = '找不到日语字幕：${transcript.path}';
-      statusText = '转写稿尚未生成';
+      transcriptSource = transcriptFile.path;
+      lastError = '找不到字幕文件：${transcriptFile.path}';
+      statusText = '字幕尚未生成';
       notifyListeners();
       return;
     }
-    transcriptPreview = await transcript.readAsString();
-    transcriptSource = transcript.path;
+    transcriptPreview = await transcriptFile.readAsString();
+    transcriptSource = transcriptFile.path;
     lastError = '';
-    statusText = '已加载 ${target.name} 的转写稿';
+    statusText = '已加载 ${target.name} 的字幕';
     notifyListeners();
   }
 
@@ -574,7 +723,8 @@ class WorkbenchController extends ChangeNotifier {
             outputDir: event['output_dir']?.toString() ?? '',
             error: event['error']?.toString() ?? '',
             warnings: (event['warnings'] as num?)?.toInt() ?? 0,
-            completedAt: '刚刚',
+            completedAt: DateTime.now().toIso8601String(),
+            format: status == 'success' ? '双语 SRT' : '日语 SRT',
           ),
         );
     }
@@ -603,7 +753,8 @@ class WorkbenchController extends ChangeNotifier {
             outputDir: result['output_dir']?.toString() ?? '',
             error: result['error']?.toString() ?? '',
             warnings: (result['warnings'] as num?)?.toInt() ?? 0,
-            completedAt: '刚刚',
+            completedAt: DateTime.now().toIso8601String(),
+            format: status == 'success' ? '双语 SRT' : '日语 SRT',
           ),
         );
       }
@@ -613,8 +764,9 @@ class WorkbenchController extends ChangeNotifier {
     _activeRequestId = null;
     _requestTaskIndices = const [];
     statusText = cancelled ? '任务已取消' : '本批任务处理完成';
+    _recordHistory();
     if (!cancelled && completedTasks.isNotEmpty) {
-      unawaited(loadTranscript(completedTasks.last));
+      unawaited(loadTranscript(completedTasks.first));
     }
   }
 
@@ -637,6 +789,174 @@ class WorkbenchController extends ChangeNotifier {
     tasks = [...tasks]..[index] = task;
   }
 
+  void _recordHistory() {
+    final latest = tasks.where((task) => task.hasOutput).toList();
+    if (latest.isEmpty) {
+      return;
+    }
+    final replacedKeys = {
+      for (final task in latest)
+        (task.outputDir.isEmpty ? task.path : task.outputDir).toLowerCase(),
+    };
+    _history = [
+      ...latest.reversed,
+      ..._history.where(
+        (task) => !replacedKeys.contains(
+          (task.outputDir.isEmpty ? task.path : task.outputDir).toLowerCase(),
+        ),
+      ),
+    ];
+    unawaited(_saveHistory());
+  }
+
+  Future<void> _loadPreferences() async {
+    final file = _preferencesFile;
+    if (!await file.exists()) {
+      return;
+    }
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! Map) {
+        return;
+      }
+      translationEnabled = decoded['translation_enabled'] as bool? ?? true;
+      reuseCache = decoded['reuse_cache'] as bool? ?? true;
+      apiPreflight = decoded['api_preflight'] as bool? ?? true;
+    } catch (error) {
+      logs.add('读取 GUI 偏好失败：$error');
+    }
+  }
+
+  Future<void> _savePreferences() async {
+    final file = _preferencesFile;
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert({
+        'translation_enabled': translationEnabled,
+        'reuse_cache': reuseCache,
+        'api_preflight': apiPreflight,
+      }),
+      flush: true,
+    );
+  }
+
+  Future<void> _loadHistory() async {
+    final restored = <TaskSnapshot>[];
+    final file = _historyFile;
+    if (await file.exists()) {
+      try {
+        final decoded = jsonDecode(await file.readAsString());
+        if (decoded is List) {
+          for (final item in decoded) {
+            if (item is Map) {
+              final task = TaskSnapshot.fromJson(
+                Map<String, dynamic>.from(item),
+              );
+              if (task.hasOutput && Directory(task.outputDir).existsSync()) {
+                restored.add(task);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        logs.add('读取历史索引失败：$error');
+      }
+    }
+
+    final discovered = _discoverProjectHistory();
+    final seen = <String>{};
+    _history = [
+      ...restored,
+      ...discovered,
+    ].where((task) {
+      final key = task.outputDir.toLowerCase();
+      return key.isNotEmpty && seen.add(key);
+    }).toList()
+      ..sort((left, right) => right.completedAt.compareTo(left.completedAt));
+    if (_history.isNotEmpty) {
+      await _saveHistory();
+    }
+  }
+
+  List<TaskSnapshot> _discoverProjectHistory() {
+    final mediaDirectory = Directory(_joinPath(_projectRoot.path, 'files'));
+    if (!mediaDirectory.existsSync()) {
+      return const [];
+    }
+    final entries = mediaDirectory.listSync(followLinks: false);
+    final media = entries
+        .whereType<File>()
+        .where((file) => _mediaExtensions.contains(_extension(file.path)))
+        .toList();
+    final history = <TaskSnapshot>[];
+    for (final directory in entries.whereType<Directory>()) {
+      final directoryName = _basename(directory.path);
+      if (!directoryName.endsWith('.voicetransl')) {
+        continue;
+      }
+      final stem = directoryName.substring(
+        0,
+        directoryName.length - '.voicetransl'.length,
+      );
+      final subtitles = directory
+          .listSync(followLinks: false)
+          .whereType<File>()
+          .where((file) => _extension(file.path) == 'srt')
+          .toList();
+      if (subtitles.isEmpty) {
+        continue;
+      }
+      subtitles.sort(
+        (left, right) => right.lastModifiedSync().compareTo(
+          left.lastModifiedSync(),
+        ),
+      );
+      File? source;
+      for (final candidate in media) {
+        final candidateName = _basename(candidate.path);
+        final dot = candidateName.lastIndexOf('.');
+        if ((dot > 0 ? candidateName.substring(0, dot) : candidateName) == stem) {
+          source = candidate;
+          break;
+        }
+      }
+      final bilingual = subtitles.any(
+        (file) => file.path.endsWith('.combine.srt') || file.path.endsWith('.zh.srt'),
+      );
+      history.add(
+        TaskSnapshot(
+          path: source?.path ?? _joinPath(mediaDirectory.path, stem),
+          name: source == null ? stem : _basename(source.path),
+          status: bilingual ? 'success' : 'transcribe_only',
+          stage: '处理完成',
+          progress: 1,
+          outputDir: directory.path,
+          completedAt: subtitles.first.lastModifiedSync().toIso8601String(),
+          format: bilingual ? '双语 SRT' : '日语 SRT',
+        ),
+      );
+    }
+    return history;
+  }
+
+  File get _preferencesFile => File(
+    _joinPath(_projectRoot.path, '.cache/flutter_preferences.json'),
+  );
+
+  File get _historyFile =>
+      File(_joinPath(_projectRoot.path, '.cache/flutter_history.json'));
+
+  Future<void> _saveHistory() async {
+    final file = _historyFile;
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(
+        _history.map((task) => task.toJson()).toList(),
+      ),
+      flush: true,
+    );
+  }
+
   @override
   void dispose() {
     unawaited(_workerSubscription?.cancel());
@@ -653,6 +973,8 @@ String _extension(String path) {
   final dot = name.lastIndexOf('.');
   return dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
 }
+
+String _twoDigits(int value) => value.toString().padLeft(2, '0');
 
 String _basename(String path) {
   final normalized = path.replaceAll('\\', '/');

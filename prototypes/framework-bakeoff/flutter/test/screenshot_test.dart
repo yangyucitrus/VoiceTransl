@@ -31,12 +31,6 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(const VoiceTranslApp(demoMode: true));
-    await tester.runAsync(() async {
-      await precacheImage(
-        const AssetImage('assets/assistant.png'),
-        tester.element(find.byKey(const ValueKey('app-canvas'))),
-      );
-    });
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
@@ -56,6 +50,6 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('任务队列'), findsOneWidget);
     expect(find.text('RJ01423376_track01.wav'), findsOneWidget);
-    expect(find.text('小樱助手'), findsNothing);
+    expect(find.text('声纹助手'), findsNothing);
   });
 }
