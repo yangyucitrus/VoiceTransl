@@ -312,10 +312,13 @@ class WorkbenchController extends ChangeNotifier {
   final WorkspaceLauncher _workspaceLauncher;
   final Directory _projectRoot;
   StreamSubscription<Map<String, dynamic>>? _workerSubscription;
+  Completer<void>? _workerReadySignal;
+  Timer? _storageRefreshTimer;
   String? _activeRequestId;
   List<int> _requestTaskIndices = const [];
   List<TaskSnapshot> _history = const [];
   bool _workspaceStateLoaded = false;
+  bool _disposed = false;
 
   bool workerReady = false;
   bool running = false;
@@ -420,13 +423,27 @@ class WorkbenchController extends ChangeNotifier {
       return;
     }
     _workerSubscription ??= worker.messages.listen(_handleWorkerMessage);
+    final readySignal = workerReady ? null : Completer<void>();
+    _workerReadySignal = readySignal;
     try {
       await worker.start();
+      if (!workerReady) {
+        await readySignal!.future.timeout(const Duration(seconds: 15));
+      }
+      await refreshRuntimeConfiguration();
+      await refreshStorage();
     } catch (error) {
+      if (_disposed) {
+        return;
+      }
       workerReady = false;
       lastError = error.toString();
       statusText = 'Python 后端启动失败';
       notifyListeners();
+    } finally {
+      if (identical(_workerReadySignal, readySignal)) {
+        _workerReadySignal = null;
+      }
     }
   }
 
@@ -552,18 +569,25 @@ class WorkbenchController extends ChangeNotifier {
 
   Future<void> refreshRuntimeConfiguration() async {
     final worker = _worker;
-    if (worker == null || !workerReady || configurationBusy) {
+    if (_disposed || worker == null || !workerReady || configurationBusy) {
       return;
     }
     configurationBusy = true;
     notifyListeners();
     try {
-      _applyRuntimeConfiguration(await worker.getConfiguration());
+      final response = await worker.getConfiguration();
+      if (!_disposed) {
+        _applyRuntimeConfiguration(response);
+      }
     } catch (error) {
-      logs.add('读取运行配置失败：$error');
+      if (!_disposed) {
+        logs.add('读取运行配置失败：$error');
+      }
     } finally {
       configurationBusy = false;
-      notifyListeners();
+      if (!_disposed) {
+        notifyListeners();
+      }
     }
   }
 
@@ -572,7 +596,7 @@ class WorkbenchController extends ChangeNotifier {
     final outputs = completedTasks
         .where((task) => task.outputDir.isNotEmpty)
         .toList(growable: false);
-    if (worker == null || !workerReady || running || storageBusy) {
+    if (_disposed || worker == null || !workerReady || running || storageBusy) {
       return;
     }
     if (outputs.isEmpty) {
@@ -582,13 +606,20 @@ class WorkbenchController extends ChangeNotifier {
     notifyListeners();
     try {
       final response = await worker.inspectStorage(_outputItems(outputs));
+      if (_disposed) {
+        return;
+      }
       _applyStorageReport(response);
       await _saveHistory();
     } catch (error) {
-      logs.add('读取结果占用失败：$error');
+      if (!_disposed) {
+        logs.add('读取结果占用失败：$error');
+      }
     } finally {
       storageBusy = false;
-      notifyListeners();
+      if (!_disposed) {
+        notifyListeners();
+      }
     }
   }
 
@@ -727,7 +758,10 @@ class WorkbenchController extends ChangeNotifier {
       return;
     }
     if (workerReady) {
-      await refreshRuntimeConfiguration();
+      await Future.wait([
+        refreshRuntimeConfiguration(),
+        refreshStorage(),
+      ]);
       lastError = '';
       statusText = 'Python 后端连接正常';
       notifyListeners();
@@ -947,14 +981,19 @@ class WorkbenchController extends ChangeNotifier {
   }
 
   void _handleWorkerMessage(Map<String, dynamic> message) {
+    if (_disposed) {
+      return;
+    }
     final type = message['type'];
     switch (type) {
       case 'ready':
         workerReady = true;
         statusText = tasks.isEmpty ? '后端已连接，请添加音频' : '后端已连接';
         lastError = '';
-        unawaited(refreshRuntimeConfiguration());
-        unawaited(refreshStorage());
+        final readySignal = _workerReadySignal;
+        if (readySignal != null && !readySignal.isCompleted) {
+          readySignal.complete();
+        }
       case 'config':
       case 'config_saved':
         _applyRuntimeConfiguration(message);
@@ -1100,11 +1139,14 @@ class WorkbenchController extends ChangeNotifier {
     _requestTaskIndices = const [];
     statusText = cancelled ? '任务已取消' : '本批任务处理完成';
     _recordHistory();
-    unawaited(
-      Future<void>.delayed(
-        const Duration(milliseconds: 150),
-        refreshStorage,
-      ),
+    _storageRefreshTimer?.cancel();
+    _storageRefreshTimer = Timer(
+      const Duration(milliseconds: 150),
+      () {
+        if (!_disposed) {
+          unawaited(refreshStorage());
+        }
+      },
     );
     if (!cancelled && completedTasks.isNotEmpty) {
       unawaited(loadTranscript(completedTasks.first));
@@ -1370,6 +1412,15 @@ class WorkbenchController extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) {
+      return;
+    }
+    _disposed = true;
+    _storageRefreshTimer?.cancel();
+    final readySignal = _workerReadySignal;
+    if (readySignal != null && !readySignal.isCompleted) {
+      readySignal.complete();
+    }
     unawaited(_workerSubscription?.cancel());
     final worker = _worker;
     if (worker != null) {

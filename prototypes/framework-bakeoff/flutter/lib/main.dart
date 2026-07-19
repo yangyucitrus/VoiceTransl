@@ -1508,7 +1508,7 @@ class _HistoryOutputHeader extends StatelessWidget {
           const Expanded(flex: 2, child: Text('缓存', style: style)),
           const Expanded(flex: 2, child: Text('完成时间', style: style)),
           const SizedBox(width: 78, child: Text('状态', style: style)),
-          const SizedBox(width: 84, child: Text('操作', style: style)),
+          const SizedBox(width: 96, child: Text('操作', style: style)),
         ],
       ),
     );
@@ -1633,7 +1633,7 @@ class _HistoryOutputRow extends StatelessWidget {
           ),
         ),
         SizedBox(
-          width: 84,
+          width: 96,
           child: Row(
             children: [
               IconButton(
